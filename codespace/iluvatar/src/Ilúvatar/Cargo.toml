@@ -1,0 +1,63 @@
+[workspace]
+members = [
+  "iluvatar_worker",
+  "iluvatar_worker_cli",
+  "iluvatar_load_gen",
+  "iluvatar_controller_library",
+  "iluvatar_controller",
+  "iluvatar_library",
+  "iluvatar_worker_library",
+  "iluvatar_energy_mon",
+  "iluvatar_rpc"
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+authors = ["Alex Fuerst <alfuerst@iu.edu>"]
+edition = "2021"
+keywords = ["FaaS", "Function as a Service", "Serverless Computing"]
+license = "GPL-3"
+readme = "../../README.md"
+repository = "https://github.com/COS-IN/iluvatar-faas"
+categories = ["science", "simulation"]
+description = "A fast, modular, extensible FaaS control plane designed for enabling serverless research."
+
+[profile.dev]
+opt-level=0
+debug=1
+debug-assertions=true
+overflow-checks=true
+lto=false
+incremental=true
+strip=false
+
+[profile.release]
+opt-level=3
+codegen-units=1
+lto=true
+debug=0
+debug-assertions=false
+overflow-checks=false
+incremental=false
+strip=true
+panic="abort"
+
+[profile.tiny]
+inherits="release"
+opt-level='z'
+lto=true
+debug=0
+debug-assertions=false
+overflow-checks=false
+incremental=false
+strip=true
+panic="abort"
+
+[profile.release.package."*"]
+opt-level=3
+debug=0
+debug-assertions=false
+overflow-checks=false
+incremental=false
+strip=true
