@@ -93,6 +93,7 @@ impl StatusService {
         Ok(ret)
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn update_status(self: Arc<Self>, tid: TransactionId) {
         let mut gpu_utilization = vec![];
         if let Some(gpu) = &self.gpu {
@@ -179,7 +180,7 @@ impl CpuHardwareMonitor {
         }))
     }
 }
-#[async_trait::async_trait]
+#[tonic::async_trait]
 impl CpuMonitorTrait for CpuHardwareMonitor {
     fn cpu_util(&self, tid: &TransactionId) -> Result<(CPUUtilPcts, f64)> {
         debug!(tid=%tid, "Computing system utilization");

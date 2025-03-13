@@ -15,13 +15,14 @@ use bollard::{
     container::{
         Config, CreateContainerOptions, ListContainersOptions, LogsOptions, RemoveContainerOptions, StatsOptions,
     },
-    image::CreateImageOptions,
+    image::{CreateImageOptions, ListImagesOptions},
 };
 use dashmap::DashSet;
 use futures::StreamExt;
 use guid_create::GUID;
 use iluvatar_library::clock::now;
 use iluvatar_library::types::{err_val, ResultErrorVal};
+use iluvatar_library::utils::file::{container_path, make_paths};
 use iluvatar_library::{
     bail_error, bail_error_value, error_value,
     transaction::TransactionId,
@@ -36,17 +37,22 @@ pub mod dockerstructs;
 
 const OWNER_TAG: &str = "owner=iluvatar_worker";
 
-#[derive(Clone, Debug, serde::Deserialize, Default)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 /// Authentication for a specific Docker repository
 pub struct DockerAuth {
     pub username: String,
     pub password: String,
     pub repository: String,
 }
-#[derive(Clone, Debug, serde::Deserialize, Default)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 /// Optional configuration to modify or pass through to Docker
 pub struct DockerConfig {
     pub auth: Option<DockerAuth>,
+    #[serde(default)]
+    /// Avoid pulling images if a matching <image:tag> is found.
+    /// Pulls it if missing.
+    /// Can skip pulling updated version of a tag, but saves time & avoids rate limiting.
+    pub avoid_pull: bool,
 }
 
 #[derive(Debug)]
@@ -65,14 +71,14 @@ impl DockerIsolation {
         let docker = match Docker::connect_with_socket_defaults() {
             Ok(d) => d,
             Err(e) => {
-                warn!(tid=%tid, error=%e, "Failed to connect to docker");
+                warn!(tid=tid, error=%e, "Failed to connect to docker");
                 return false;
             },
         };
-        match docker.version().await {
+        match docker.ping().await {
             Ok(_) => true,
             Err(e) => {
-                warn!(tid=%tid, error=%e, "Failed to query docker version");
+                warn!(tid=tid, error=?e, "Failed to query docker version");
                 false
             },
         }
@@ -86,7 +92,7 @@ impl DockerIsolation {
     ) -> Result<Self> {
         let docker = match Docker::connect_with_socket_defaults() {
             Ok(d) => d,
-            Err(e) => bail_error!(tid=%tid, error=%e, "Failed to connect to docker"),
+            Err(e) => bail_error!(tid=tid, error=%e, "Failed to connect to docker"),
         };
         let sem = match config.concurrent_creation {
             0 => None,
@@ -107,10 +113,10 @@ impl DockerIsolation {
         tid: &TransactionId,
         image_name: &str,
         container_id: &str,
-        mut env: Vec<&str>,
+        mut env: Vec<String>,
         mem_limit_mb: MemSizeMb,
         cpus: u32,
-        device_resource: &Option<crate::services::resources::gpu::GPU>,
+        device_resource: &Option<GPU>,
         ports: BollardPortBindings,
         host_config: Option<HostConfig>,
         entrypoint: Option<Vec<String>>,
@@ -128,13 +134,13 @@ impl DockerIsolation {
             },
             None => None,
         };
-        let mut volumes = vec![];
+        let ctr_dir = container_path(container_id);
+        make_paths(&ctr_dir, tid)?;
+        let mut volumes = vec![format!("{}:/iluvatar/sockets", ctr_dir.to_string_lossy())];
         let mut device_requests = vec![];
 
-        let mps_thread;
-        let mps_mem;
         if let Some(device) = device_resource.as_ref() {
-            info!(tid=%tid, container_id=%container_id, "Container will get a GPU");
+            info!(tid=tid, container_id=%container_id, "Container will get a GPU");
             device_requests.push(DeviceRequest {
                 driver: Some("".into()),
                 count: None,
@@ -150,12 +156,12 @@ impl DockerIsolation {
             }
 
             if self.config.gpu_resource.as_ref().is_some_and(|c| c.mps_enabled()) {
-                info!(tid=%tid, container_id=%container_id, threads=device.thread_pct, memory=device.allotted_mb, "Container running inside MPS context");
+                info!(tid=tid, container_id=%container_id, threads=device.thread_pct, memory=device.allotted_mb, "Container running inside MPS context");
                 host_config.ipc_mode = Some("host".to_owned());
-                mps_thread = format!("CUDA_MPS_ACTIVE_THREAD_PERCENTAGE={}", device.thread_pct);
-                mps_mem = format!("CUDA_MPS_PINNED_DEVICE_MEM_LIMIT={}MB", device.allotted_mb);
-                env.push(mps_thread.as_str());
-                env.push(mps_mem.as_str());
+                let mps_thread = format!("CUDA_MPS_ACTIVE_THREAD_PERCENTAGE={}", device.thread_pct);
+                let mps_mem = format!("CUDA_MPS_PINNED_DEVICE_MEM_LIMIT={}MB", device.allotted_mb);
+                env.push(mps_thread);
+                env.push(mps_mem);
                 volumes.push("/tmp/nvidia-mps:/tmp/nvidia-mps".to_owned());
             }
             if self
@@ -164,7 +170,7 @@ impl DockerIsolation {
                 .as_ref()
                 .is_some_and(|c| c.driver_hook_enabled())
             {
-                env.push("LD_PRELOAD=/app/libgpushare.so");
+                env.push("LD_PRELOAD=/app/libgpushare.so".to_owned());
             }
         }
         match host_config.binds.as_mut() {
@@ -187,32 +193,28 @@ impl DockerIsolation {
             name: container_id,
             platform: None,
         };
-        let mut owned_env = vec![];
-        for e in env {
-            owned_env.push(e.to_owned());
-        }
 
         let config: Config<String> = Config {
             labels: Some(HashMap::from([("owner".to_owned(), "iluvatar_worker".to_owned())])),
             image: Some(image_name.to_owned()),
             host_config: Some(host_config),
-            env: Some(owned_env),
+            env: Some(env),
             exposed_ports: exposed_ports,
             entrypoint: entrypoint,
             ..Default::default()
         };
-        debug!(tid=%tid, container_id=%container_id, config=?config, "Creating container");
+        debug!(tid=tid, container_id=%container_id, config=?config, "Creating container");
         match self.docker_api.create_container(Some(options), config).await {
             Ok(_) => (),
-            Err(e) => bail_error!(tid=%tid, error=%e, "Error creating container"),
+            Err(e) => bail_error!(tid=tid, error=%e, "Error creating container"),
         };
-        debug!(tid=%tid, container_id=%container_id, "Container created");
+        debug!(tid=tid, container_id=%container_id, "Container created");
 
         match self.docker_api.start_container::<String>(container_id, None).await {
             Ok(_) => (),
-            Err(e) => bail_error!(tid=%tid, error=%e, "Error starting container"),
+            Err(e) => bail_error!(tid=tid, error=%e, "Error starting container"),
         };
-        debug!(tid=%tid, container_id=%container_id, "Container started");
+        debug!(tid=tid, container_id=%container_id, "Container started");
         Ok(())
     }
 
@@ -237,7 +239,7 @@ impl DockerIsolation {
                     },
                     _ => (),
                 },
-                Err(e) => bail_error!(tid=%tid, error=%e, "Failed to get Docker logs"),
+                Err(e) => bail_error!(tid=tid, error=%e, "Failed to get Docker logs"),
             }
         }
         Ok((stdout, stderr))
@@ -263,7 +265,7 @@ impl ContainerIsolationService for DockerIsolation {
     /// creates and starts the entrypoint for a container based on the given image
     /// Run inside the specified namespace
     /// returns a new, unique ID representing it
-    #[cfg_attr(feature = "full_spans", tracing::instrument(skip(self, reg, fqdn, image_name, parallel_invokes, _namespace, mem_limit_mb, cpus), fields(tid=%tid)))]
+    #[cfg_attr(feature = "full_spans", tracing::instrument(skip(self, reg, fqdn, image_name, parallel_invokes, _namespace, mem_limit_mb, cpus), fields(tid=tid)))]
     async fn run_container(
         &self,
         fqdn: &str,
@@ -291,7 +293,7 @@ impl ContainerIsolationService for DockerIsolation {
             "GUNICORN_CMD_ARGS=--workers=1 --timeout={} --bind=0.0.0.0:{}",
             &self.limits_config.timeout_sec, port
         );
-        env.push(gunicorn_args.as_str());
+        env.push(gunicorn_args);
         let mut ports = HashMap::new();
         ports.insert(
             format!("{}/tcp", port),
@@ -300,22 +302,23 @@ impl ContainerIsolationService for DockerIsolation {
                 host_port: Some(port.to_string()),
             }]),
         );
-        let il_port = format!("__IL_PORT={}", port);
-        env.push(il_port.as_str());
+        env.push(format!("__IL_PORT={}", port));
+        env.push(format!("__IL_SOCKET={}", "/iluvatar/sockets/sock"));
 
         let permit = match &self.creation_sem {
             Some(sem) => match sem.acquire().await {
                 Ok(p) => {
-                    debug!(tid=%tid, "Acquired docker creation semaphore");
+                    debug!(tid = tid, "Acquired docker creation semaphore");
                     Some(p)
                 },
                 Err(e) => {
-                    bail_error_value!(error=%e, tid=%tid, "Error trying to acquire docker creation semaphore", device_resource);
+                    bail_error_value!(error=%e, tid=tid, "Error trying to acquire docker creation semaphore", device_resource);
                 },
             },
             None => None,
         };
 
+        info!(tid = tid, cid = cid, "launching container");
         if let Err(e) = self
             .docker_run(
                 tid,
@@ -331,7 +334,7 @@ impl ContainerIsolationService for DockerIsolation {
             )
             .await
         {
-            bail_error_value!(error=%e, tid=%tid, "Error trying to acquire docker creation semaphore", device_resource);
+            bail_error_value!(error=%e, tid=tid, "Error trying to acquire docker creation semaphore", device_resource);
         };
 
         drop(permit);
@@ -348,7 +351,9 @@ impl ContainerIsolationService for DockerIsolation {
                 compute,
                 device_resource,
                 tid,
-            ) {
+            )
+            .await
+            {
                 Ok(c) => c,
                 Err((e, d)) => return err_val(e, d),
             };
@@ -369,44 +374,73 @@ impl ContainerIsolationService for DockerIsolation {
             .await
         {
             Ok(_) => Ok(()),
-            Err(e) => bail_error!(tid=%tid, error=%e, "Failed to remove Docker container"),
+            Err(e) => bail_error!(tid=tid, error=%e, "Failed to remove Docker container"),
         }
     }
 
     async fn prepare_function_registration(
         &self,
         rf: &mut RegisteredFunction,
+        _namespace: &str,
         _fqdn: &str,
         tid: &TransactionId,
     ) -> Result<()> {
+        debug!(tid = tid, "prepare_function_registration");
         if self.pulled_images.contains(&rf.image_name) {
+            debug!(tid = tid, "image exists, skipping");
             return Ok(());
         }
+
+        let auth = match &self.docker_config {
+            Some(cfg) => {
+                if cfg.avoid_pull {
+                    let image_name_no_hub = rf.image_name.split('/').skip(1).collect::<Vec<&str>>().join("/");
+                    let list = Some(ListImagesOptions {
+                        all: false,
+                        filters: HashMap::from_iter([("reference", vec![image_name_no_hub.as_ref()])]),
+                        digests: false,
+                    });
+
+                    debug!(tid = tid, query = image_name_no_hub, "querying images");
+                    match self.docker_api.list_images(list).await {
+                        Ok(ls) => {
+                            for image in ls {
+                                for tag in &image.repo_tags {
+                                    if tag == &image_name_no_hub {
+                                        info!(tid=tid, image=?image, "image found, skipping pull");
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                        },
+                        Err(e) => warn!(tid=tid, error=%e, "Failed to list docker images"),
+                    };
+                }
+                match &cfg.auth {
+                    Some(a) if rf.image_name.starts_with(a.repository.as_str()) => Some(DockerCredentials {
+                        username: Some(a.username.clone()),
+                        password: Some(a.password.clone()),
+                        ..Default::default()
+                    }),
+                    _ => None,
+                }
+            },
+            None => None,
+        };
 
         let options = Some(CreateImageOptions {
             from_image: rf.image_name.as_str(),
             ..Default::default()
         });
-        let auth = match &self.docker_config {
-            Some(cfg) => match &cfg.auth {
-                Some(a) if rf.image_name.starts_with(a.repository.as_str()) => Some(DockerCredentials {
-                    username: Some(a.username.clone()),
-                    password: Some(a.password.clone()),
-                    ..Default::default()
-                }),
-                _ => None,
-            },
-            None => None,
-        };
 
         let mut stream = self.docker_api.create_image(options, None, auth);
         while let Some(res) = stream.next().await {
             match res {
-                Ok(_) => (),
-                Err(e) => bail_error!(tid=%tid, error=%e, "Failed to pull image"),
+                Ok(inf) => debug!(tid=tid, info=?inf, "pull info update"),
+                Err(e) => bail_error!(tid=tid, error=%e, "Failed to pull image"),
             }
         }
-        info!(tid=%tid, name=%rf.image_name, "Docker image pulled successfully");
+        info!(tid=tid, name=%rf.image_name, "Docker image pulled successfully");
         self.pulled_images.insert(rf.image_name.clone());
         Ok(())
     }
@@ -425,7 +459,7 @@ impl ContainerIsolationService for DockerIsolation {
         };
         let list = match self.docker_api.list_containers(Some(options)).await {
             Ok(l) => l,
-            Err(e) => bail_error!(tid=%tid, error=%e, "Failed to list Docker containers"),
+            Err(e) => bail_error!(tid=tid, error=%e, "Failed to list Docker containers"),
         };
         for container in list {
             if let Some(id) = container.id {
@@ -436,14 +470,14 @@ impl ContainerIsolationService for DockerIsolation {
                 };
                 match self.docker_api.remove_container(&id, Some(options)).await {
                     Ok(_) => (),
-                    Err(e) => error!(tid=%tid, error=%e, "Failed to remove Docker container"),
+                    Err(e) => error!(tid=tid, error=%e, "Failed to remove Docker container"),
                 }
             };
         }
         Ok(())
     }
 
-    #[cfg_attr(feature = "full_spans", tracing::instrument(skip(self, container, timeout_ms), fields(tid=%tid)))]
+    #[cfg_attr(feature = "full_spans", tracing::instrument(level="debug", skip(self, container, timeout_ms), fields(tid=tid)))]
     async fn wait_startup(&self, container: &Container, timeout_ms: u64, tid: &TransactionId) -> Result<()> {
         let start = now();
         loop {
@@ -455,29 +489,29 @@ impl ContainerIsolationService for DockerIsolation {
                     }
                 },
                 Err(e) => {
-                    bail_error!(tid=%tid, container_id=%container.container_id(), error=%e, "Timeout while reading inotify events for docker container")
+                    bail_error!(tid=tid, container_id=%container.container_id(), error=%e, "Timeout while reading inotify events for docker container")
                 },
             };
             if start.elapsed().as_millis() as u64 >= timeout_ms {
                 let (stdout, stderr) = self.get_logs(container.container_id(), tid).await?;
                 if !stderr.is_empty() {
-                    warn!(tid=%tid, container_id=%&container.container_id(), "Timeout waiting for docker container start, but stderr was written to?");
+                    warn!(tid=tid, container_id=%&container.container_id(), "Timeout waiting for docker container start, but stderr was written to?");
                     return Ok(());
                 }
-                bail_error!(tid=%tid, container_id=%container.container_id(), stdout=%stdout, stderr=%stderr, "Timeout while monitoring logs for docker container");
+                bail_error!(tid=tid, container_id=%container.container_id(), stdout=%stdout, stderr=%stderr, "Timeout while monitoring logs for docker container");
             }
             tokio::time::sleep(std::time::Duration::from_micros(100)).await;
         }
         Ok(())
     }
 
-    #[cfg_attr(feature = "full_spans", tracing::instrument(skip(self, container), fields(tid=%tid)))]
+    #[cfg_attr(feature = "full_spans", tracing::instrument(level="debug", skip(self, container), fields(tid=tid)))]
     async fn update_memory_usage_mb(&self, container: &Container, tid: &TransactionId) -> MemSizeMb {
-        debug!(tid=%tid, container_id=%container.container_id(), "Updating memory usage for container");
+        debug!(tid=tid, container_id=%container.container_id(), "Updating memory usage for container");
         let cast_container = match crate::services::containers::structs::cast::<DockerContainer>(container) {
             Ok(c) => c,
             Err(e) => {
-                warn!(tid=%tid, error=%e, "Error casting container to DockerContainer");
+                warn!(tid=tid, error=%e, "Error casting container to DockerContainer");
                 return container.get_curr_mem_usage();
             },
         };
@@ -498,13 +532,13 @@ impl ContainerIsolationService for DockerIsolation {
                     }
                 },
                 Err(e) => {
-                    error!(tid=%tid, error=%e, "Failed to query stats");
+                    error!(tid=tid, error=%e, "Failed to query stats");
                     container.mark_unhealthy();
                     return container.get_curr_mem_usage();
                 },
             }
         }
-        warn!(tid=%tid, container_id=%container.container_id(), "Fell out of bottom of stats stream loop");
+        warn!(tid=tid, container_id=%container.container_id(), "Fell out of bottom of stats stream loop");
         container.get_curr_mem_usage()
     }
 

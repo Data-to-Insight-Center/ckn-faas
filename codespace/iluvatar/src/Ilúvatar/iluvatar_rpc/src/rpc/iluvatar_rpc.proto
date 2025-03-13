@@ -18,6 +18,21 @@ message InvokeRequest {
   string transaction_id = 4;
 }
 
+message RegisteredFunction {
+  string function_name = 1;
+  string function_version = 2;
+  string image_name = 3;
+}
+
+
+message ListFunctionRequest {
+  string transaction_id = 1;
+}
+
+message ListFunctionResponse {
+  repeated RegisteredFunction functions = 1;
+}
+
 message InvokeResponse {
   string json_result = 1;
   bool success = 2;
@@ -78,12 +93,14 @@ message RegisterRequest {
   uint32 parallel_invokes = 6;
   string transaction_id = 7;
   LanguageRuntime language = 8;
-  // The compute platforms that the function can run on. Passing multiple means the function can optionall run on any of them, and the platform will choose at execution time.
+  // The compute platforms that the function can run on. Passing multiple means the function can optional run on any of them, and the platform will choose at execution time.
   uint32 compute = 9;
-  // The compute platforms that the function can run on. Passing multiple means the function can optionall run on any of them, and the platform will choose at execution time.
+  // The compute platforms that the function can run on. Passing multiple means the function can optional run on any of them, and the platform will choose at execution time.
   uint32 isolate = 10;
+  // The type of server built into the image, see `ContainerServer`
+  uint32 container_server = 11;
   // Optional. A serialized string of the iluvatar_library::types::ResourceTimings struct to pre-populate the worker with information
-  string resource_timings_json = 11;
+  string resource_timings_json = 12;
 }
 
 message RegisterResponse {
@@ -145,6 +162,7 @@ service IluvatarWorker {
   rpc status(StatusRequest) returns (StatusResponse) {}
   // Instruct the worker to remove all containers it has created
   rpc clean(CleanRequest) returns (CleanResponse) {}
+  rpc list_registered_funcs(ListFunctionRequest) returns (ListFunctionResponse) {}
 }
 
 message RegisterWorkerRequest {

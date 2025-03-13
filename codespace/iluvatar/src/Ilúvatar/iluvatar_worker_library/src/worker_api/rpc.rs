@@ -3,14 +3,14 @@ use super::WorkerAPI;
 use anyhow::{bail, Result};
 use iluvatar_library::bail_error;
 use iluvatar_library::transaction::TransactionId;
-use iluvatar_library::types::{Compute, HealthStatus, Isolation, MemSizeMb, ResourceTimings};
+use iluvatar_library::types::{Compute, ContainerServer, HealthStatus, Isolation, MemSizeMb, ResourceTimings};
 use iluvatar_library::utils::port::Port;
 use iluvatar_rpc::rpc::iluvatar_worker_client::IluvatarWorkerClient;
 use iluvatar_rpc::rpc::{
-    CleanRequest, HealthRequest, InvokeAsyncLookupRequest, InvokeAsyncRequest, InvokeRequest, PingRequest,
-    PrewarmRequest, RegisterRequest, StatusRequest,
+    CleanRequest, HealthRequest, InvokeAsyncLookupRequest, InvokeAsyncRequest, InvokeRequest, ListFunctionRequest,
+    PingRequest, PrewarmRequest, RegisterRequest, StatusRequest,
 };
-use iluvatar_rpc::rpc::{CleanResponse, InvokeResponse, LanguageRuntime, StatusResponse};
+use iluvatar_rpc::rpc::{CleanResponse, InvokeResponse, LanguageRuntime, ListFunctionResponse, StatusResponse};
 use iluvatar_rpc::RPCError;
 use tonic::transport::Channel;
 use tonic::{Code, Request, Status};
@@ -183,6 +183,7 @@ impl WorkerAPI for RPCWorkerAPI {
         tid: TransactionId,
         isolate: Isolation,
         compute: Compute,
+        server: ContainerServer,
         timings: Option<&ResourceTimings>,
     ) -> Result<String> {
         let request = Request::new(RegisterRequest {
@@ -199,6 +200,7 @@ impl WorkerAPI for RPCWorkerAPI {
             language: LanguageRuntime::Nolang.into(),
             compute: compute.bits(),
             isolate: isolate.bits(),
+            container_server: server as u32,
             resource_timings_json: match timings {
                 Some(r) => serde_json::to_string(r)?,
                 None => "{}".to_string(),
@@ -234,6 +236,14 @@ impl WorkerAPI for RPCWorkerAPI {
                 }
             },
             Err(e) => bail!(RPCError::new(e, "[RCPWorkerAPI:health]".to_string())),
+        }
+    }
+
+    async fn list_registered_funcs(&mut self, tid: TransactionId) -> Result<ListFunctionResponse> {
+        let request = Request::new(ListFunctionRequest { transaction_id: tid });
+        match self.client.list_registered_funcs(request).await {
+            Ok(response) => Ok(response.into_inner()),
+            Err(e) => bail!(RPCError::new(e, "[RCPWorkerAPI:list_registered_funcs]".to_string())),
         }
     }
 

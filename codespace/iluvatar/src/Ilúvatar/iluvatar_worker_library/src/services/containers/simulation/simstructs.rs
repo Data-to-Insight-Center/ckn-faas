@@ -13,7 +13,7 @@ use iluvatar_library::{
     types::{Compute, DroppableToken, Isolation, MemSizeMb},
 };
 use parking_lot::{Mutex, RwLock};
-use rand::{seq::index::sample, thread_rng};
+use rand::{rng, seq::index::sample};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -128,13 +128,13 @@ pub struct Body {
 
 #[tonic::async_trait]
 impl ContainerT for SimulatorContainer {
-    #[tracing::instrument(skip(self, json_args), fields(tid=%tid, fqdn=%self.fqdn), name="SimulatorContainer::invoke")]
+    #[tracing::instrument(skip(self, json_args), fields(tid=tid, fqdn=%self.fqdn), name="SimulatorContainer::invoke")]
     async fn invoke(&self, json_args: &str, tid: &TransactionId) -> Result<(ParsedResult, Duration)> {
         // just sleep for a while based on data from json args
         let data = match serde_json::from_str::<SimulationInvocation>(json_args) {
             Ok(d) => d,
             Err(e) => {
-                bail_error!(tid=%tid, error=%e, args=%json_args, "Unable to deserialize run time information")
+                bail_error!(tid=tid, error=%e, args=%json_args, "Unable to deserialize run time information")
             },
         };
 
@@ -148,7 +148,7 @@ impl ContainerT for SimulatorContainer {
                 true => data.cold_dur_ms as f64 / 1000.0 * 1.2,
                 _ => match &self.history_data {
                     Some(history_data) => {
-                        let idx = sample(&mut thread_rng(), history_data.len(), 1);
+                        let idx = sample(&mut rng(), history_data.len(), 1);
                         history_data[idx.index(0)]
                     },
                     None => data.warm_dur_ms as f64 / 1000.0 * 1.2,
@@ -247,13 +247,13 @@ impl ContainerT for SimulatorContainer {
         self.device.write().take()
     }
     fn add_drop_on_remove(&self, item: DroppableToken, tid: &TransactionId) {
-        debug!(tid=%tid, container_id=%self.container_id(), "Adding token to drop on remove");
+        debug!(tid=tid, container_id=%self.container_id(), "Adding token to drop on remove");
         self.drop_on_remove.lock().push(item);
     }
     fn remove_drop(&self, tid: &TransactionId) {
         let mut lck = self.drop_on_remove.lock();
         let to_drop = std::mem::take(&mut *lck);
-        debug!(tid=%tid, container_id=%self.container_id(), num_tokens=to_drop.len(), "Dropping tokens");
+        debug!(tid=tid, container_id=%self.container_id(), num_tokens=to_drop.len(), "Dropping tokens");
         for i in to_drop.into_iter() {
             drop(i);
         }
@@ -284,11 +284,9 @@ mod sim_struct_tests {
             image_name: "none".to_string(),
             memory: 1024,
             cpus: 1,
-            snapshot_base: "".to_string(),
             parallel_invokes: 1,
-            isolation_type: Isolation::CONTAINERD,
-            supported_compute: Compute::CPU,
             historical_runtime_data_sec: map,
+            ..Default::default()
         })
     }
 

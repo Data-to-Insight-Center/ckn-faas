@@ -21,15 +21,20 @@ use client::tonic::Code;
 use client::types::Descriptor;
 use client::with_namespace;
 use containerd_client as client;
+// use containerd_client::services::v1::streaming_client::StreamingClient;
+// use containerd_client::services::v1::transfer_client::TransferClient;
+// use containerd_client::services::v1::TransferRequest;
 use containerd_client::tonic::{transport::Channel, Request};
+// use containerd_client::types::transfer::{ImageStore, OciRegistry, RegistryResolver, UnpackConfiguration};
+// use containerd_client::types::Platform;
 use dashmap::DashMap;
 use guid_create::GUID;
 use iluvatar_library::clock::now;
 use iluvatar_library::types::{err_val, Compute, Isolation, ResultErrorVal};
-use iluvatar_library::utils::execute_cmd;
+use iluvatar_library::utils::file::{container_path, make_paths};
 use iluvatar_library::utils::{
     cgroup::cgroup_namespace,
-    file::{temp_file_pth, touch, try_remove_pth},
+    file::{touch, try_remove_pth},
     port::Port,
     try_get_child_pid,
 };
@@ -39,8 +44,8 @@ use oci_spec::image::{ImageConfiguration, ImageIndex, ImageManifest};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::mpsc;
-use std::sync::mpsc::sync_channel;
+use std::path::PathBuf;
+use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -67,7 +72,7 @@ pub struct ContainerdIsolation {
     docker_config: Option<DockerConfig>,
     downloaded_images: Arc<DashMap<String, bool>>,
     creation_sem: Option<tokio::sync::Semaphore>,
-    tx: Arc<mpsc::SyncSender<BGPacket>>,
+    tx: Arc<SyncSender<BGPacket>>,
     bg_workqueue: thread::JoinHandle<Result<()>>,
 }
 
@@ -78,7 +83,7 @@ impl ContainerdIsolation {
         let channel = match containerd_client::connect(CONTAINERD_SOCK).await {
             Ok(c) => c,
             Err(e) => {
-                warn!(tid=%tid, error=?e, "Failed to connect to containerd socket");
+                warn!(tid=tid, error=?e, "Failed to connect to containerd socket");
                 return false;
             },
         };
@@ -86,7 +91,7 @@ impl ContainerdIsolation {
         let _: client::tonic::Response<VersionResponse> = match client.version(()).await {
             Ok(c) => c,
             Err(e) => {
-                warn!(tid=%tid, error=?e, "Failed to query Containerd version");
+                warn!(tid=tid, error=?e, "Failed to query Containerd version");
                 return false;
             },
         };
@@ -186,6 +191,8 @@ impl ContainerdIsolation {
             .replace("$OUTPUT", "")
             .replace("$HOST_ADDR", host_addr)
             .replace("$PORT", &port.to_string())
+            .replace("$SOCK", "/iluvatar/sockets")
+            .replace("$CTR_ID", container_id)
             .replace("$NET_NS", &NamespaceManager::net_namespace(net_ns_name))
             .replace("\"$MEMLIMIT\"", &(mem_limit_mb * 1024 * 1024).to_string())
             //        .replace("\"$SWAPLIMIT\"", &(mem_limit_mb*1024*1024*2).to_string())
@@ -238,10 +245,10 @@ impl ContainerdIsolation {
         let rsp = cli.prepare(with_namespace!(view_snapshot_req, "default")).await;
         if let Ok(rsp) = rsp {
             let rsp = rsp.into_inner();
-            debug!(tid=%tid, container_id=%cid, mounts=?rsp.mounts, "got mounts");
+            debug!(tid=tid, container_id=%cid, mounts=?rsp.mounts, "got mounts");
             Ok(rsp.mounts)
         } else {
-            bail_error!(tid=%tid, response=?rsp, "Failed to prepare snapshot and load mounts")
+            bail_error!(tid=tid, response=?rsp, "Failed to prepare snapshot and load mounts")
         }
     }
 
@@ -259,7 +266,7 @@ impl ContainerdIsolation {
                 Ok(_) => return Ok(()),
                 Err(e2) => {
                     if start.elapsed() > timeout {
-                        bail_error!(tid=%tid, container_id=%container_id, error=%e2, "Deleting task in container failed");
+                        bail_error!(tid=tid, container_id=%container_id, error=%e2, "Deleting task in container failed");
                     }
                     // sleep a little and hope the process has terminated in that time
                     tokio::time::sleep(Duration::from_millis(5)).await;
@@ -285,14 +292,14 @@ impl ContainerdIsolation {
         let resp = client.delete(req).await;
         match &resp {
             Ok(_) => {
-                debug!(tid=%tid, response=?resp, "Delete task response");
+                debug!(tid=tid, response=?resp, "Delete task response");
                 Ok(())
             },
             Err(e) => {
                 match e.code() {
                     // task crashed and was removed
                     Code::NotFound => {
-                        warn!(tid=%tid, container_id=%container_id, "Task for container was missing when it was attempted to be delete. Usually the process crashed");
+                        warn!(tid=tid, container_id=%container_id, "Task for container was missing when it was attempted to be delete. Usually the process crashed");
                         Ok(())
                     },
                     _ => anyhow::bail!(
@@ -328,13 +335,13 @@ impl ContainerdIsolation {
             Err(e) => {
                 if e.code() == Code::NotFound {
                     // task crashed and was removed
-                    warn!(tid=%tid, container_id=%container_id, "Task for container was missing when it was attempted to be killed");
+                    warn!(tid=tid, container_id=%container_id, "Task for container was missing when it was attempted to be killed");
                 } else {
-                    bail_error!(tid=%tid, container_id=%container_id, error=%e, "Attempt to kill task in container failed");
+                    bail_error!(tid=tid, container_id=%container_id, error=%e, "Attempt to kill task in container failed");
                 }
             },
         };
-        debug!(tid=%tid, response=?resp, "Kill task response");
+        debug!(tid=tid, response=?resp, "Kill task response");
         Ok(())
     }
 
@@ -352,26 +359,24 @@ impl ContainerdIsolation {
 
         let resp = match client.delete(req).await {
             Ok(resp) => resp,
-            Err(e) => bail_error!(tid=%tid, error=%e, "Delete container failed"),
+            Err(e) => bail_error!(tid=tid, error=%e, "Delete container failed"),
         };
-        debug!(tid=%tid, response=?resp, "Delete container response");
+        debug!(tid=tid, response=?resp, "Delete container response");
         Ok(())
     }
 
     fn delete_container_resources(&self, container_id: &str, tid: &TransactionId) {
-        try_remove_pth(&self.stdin_pth(container_id), tid);
-        try_remove_pth(&self.stdout_pth(container_id), tid);
-        try_remove_pth(&self.stderr_pth(container_id), tid);
+        try_remove_pth(container_path(container_id), tid)
     }
 
-    #[cfg_attr(feature = "full_spans", tracing::instrument(skip(self), fields(tid=%tid)))]
+    #[cfg_attr(feature = "full_spans", tracing::instrument(skip(self), fields(tid=tid)))]
     async fn remove_container_internal(
         &self,
         container_id: &str,
         ctd_namespace: &str,
         tid: &TransactionId,
     ) -> Result<()> {
-        info!(tid=%tid, container_id=%container_id, "Removing container");
+        info!(tid=tid, container_id=%container_id, "Removing container");
         let mut client = TasksClient::new(self.channel());
         self.kill_task(&mut client, container_id, ctd_namespace, tid).await?;
         self.delete_task(&mut client, container_id, ctd_namespace, tid).await?;
@@ -381,7 +386,7 @@ impl ContainerdIsolation {
             .await?;
         self.delete_container_resources(container_id, tid);
 
-        debug!(tid=%tid, container_id=%container_id, "Container deleted");
+        debug!(tid=tid, container_id=%container_id, "Container deleted");
         Ok(())
     }
 
@@ -392,9 +397,9 @@ impl ContainerdIsolation {
         let mut cli = ImagesClient::new(self.channel());
         let rsp = match cli.get(with_namespace!(get_image_req, namespace)).await {
             Ok(rsp) => rsp.into_inner(),
-            Err(e) => bail_error!(tid=%tid, error=%e, "Failed to get image"),
+            Err(e) => bail_error!(tid=tid, error=%e, "Failed to get image"),
         };
-        debug!(tid=%tid,response=?rsp, "image response");
+        debug!(tid=tid,response=?rsp, "image response");
         let (image_digest, media_type) = if let Some(image) = rsp.image {
             image
                 .target
@@ -404,7 +409,7 @@ impl ContainerdIsolation {
             anyhow::bail!("Could not find image")
         };
 
-        debug!(tid=%tid, image=%image, digest=?image_digest, "got image digest");
+        debug!(tid=tid, image=%image, digest=?image_digest, "got image digest");
 
         // Step 2. get image content manifests
         let content = self.read_content(namespace, image_digest).await?;
@@ -413,9 +418,9 @@ impl ContainerdIsolation {
             "application/vnd.docker.distribution.manifest.list.v2+json" => {
                 let config_index: ImageIndex = match serde_json::from_slice(&content) {
                     Ok(s) => s,
-                    Err(e) => bail_error!(tid=%tid, error=%e, "JSON error getting ImageIndex"),
+                    Err(e) => bail_error!(tid=tid, error=%e, "JSON error getting ImageIndex"),
                 };
-                debug!(tid=%tid, index=?config_index, "config ImageIndex");
+                debug!(tid=tid, index=?config_index, "config ImageIndex");
 
                 let manifest_item = config_index
                     .manifests()
@@ -428,18 +433,18 @@ impl ContainerdIsolation {
                     .digest()
                     .to_owned();
 
-                debug!(tid=%tid, manifest=?manifest_item, "Acquired manifest item");
+                debug!(tid=tid, manifest=?manifest_item, "Acquired manifest item");
                 // Step 3. load image manifest from specific platform filter
                 let layer_item: ImageManifest =
-                    match serde_json::from_slice(&self.read_content(namespace, manifest_item).await?) {
+                    match serde_json::from_slice(&self.read_content(namespace, manifest_item.to_string()).await?) {
                         Ok(s) => s,
-                        Err(e) => bail_error!(tid=%tid, error=%e, "JSON error getting ImageManifest"),
+                        Err(e) => bail_error!(tid=tid, error=%e, "JSON error getting ImageManifest"),
                     };
                 layer_item.config().to_owned()
             },
             "application/vnd.docker.distribution.manifest.v2+json" => {
                 let config_index: ImageManifest = serde_json::from_slice(&content)?;
-                debug!(tid=%tid, manifest=?config_index, "config ImageManifest");
+                debug!(tid=tid, manifest=?config_index, "config ImageManifest");
                 config_index.config().to_owned()
             },
             _ => anyhow::bail!("Don't know how to handle unknown image media type '{}'", media_type),
@@ -447,12 +452,12 @@ impl ContainerdIsolation {
 
         // Step 5. load image configuration (layer) from image
         let config: ImageConfiguration =
-            match serde_json::from_slice(&self.read_content(namespace, layer_item.digest().to_owned()).await?) {
+            match serde_json::from_slice(&self.read_content(namespace, layer_item.digest().to_string()).await?) {
                 Ok(s) => s,
-                Err(e) => bail_error!(tid=%tid, error=%e, "JSON error getting ImageConfiguration"),
+                Err(e) => bail_error!(tid=tid, error=%e, "JSON error getting ImageConfiguration"),
             };
 
-        debug!(tid=%tid, config=?config, "Loaded ImageConfiguration");
+        debug!(tid=tid, config=?config, "Loaded ImageConfiguration");
 
         // Step 6. calculate finalize digest
         let mut iter = config.rootfs().diff_ids().iter();
@@ -465,12 +470,16 @@ impl ContainerdIsolation {
             let sha = hex::encode(hasher.finalize());
             prev_digest = format!("sha256:{}", sha)
         }
-        debug!(tid=%tid, image=%image, digest=%prev_digest, "loaded diff digest");
+        debug!(tid=tid, image=%image, digest=%prev_digest, "loaded diff digest");
         Ok(prev_digest)
     }
 
     /// Ensures that the specified image is available on the machine
-    async fn ensure_image(&self, image_name: &str, tid: &TransactionId) -> Result<()> {
+    async fn ensure_image(&self, image_name: &str, tid: &TransactionId, _namespace: &str) -> Result<()> {
+        if self.downloaded_images.contains_key(image_name) {
+            return Ok(());
+        }
+
         if self.downloaded_images.contains_key(image_name) {
             return Ok(());
         }
@@ -486,7 +495,7 @@ impl ContainerdIsolation {
             }
         }
         args.push(image_name);
-        let output = execute_cmd("/usr/bin/ctr", args, None, tid);
+        let output = iluvatar_library::utils::execute_cmd("/usr/bin/ctr", args, None, tid);
         match output {
             Err(e) => anyhow::bail!("Failed to pull the image '{}' because of error {}", image_name, e),
             Ok(output) => {
@@ -517,6 +526,105 @@ impl ContainerdIsolation {
                 }
             },
         }
+        // let mut resolver = None;
+        // let mut _stream_client;
+        // let mut _stream = None;
+        // let trans_options = None;
+        // let stream_uuid = GUID::rand().to_string();
+        // if let Some(docker) = &self.docker_config {
+        //     if let Some(auth) = &docker.auth {
+        //         if !auth.repository.is_empty() && image_name.starts_with(auth.repository.as_str()) {
+        //             _stream_client = StreamingClient::new(self.channel().clone());
+        //             let req = containerd_client::services::v1::StreamInit {
+        //                 id: stream_uuid.clone(),
+        //             };
+        //             let req = containerd_client::to_any(&req);
+        //             // let req= with_namespace!(req, namespace);
+        //             // let req = containerd_client::to_any(&req);
+        //             // tokio_stream::iter(any_init)
+        //             info!(tid=tid, uuid=%stream_uuid, "sending stream request");
+        //
+        //             let mut stream = match _stream_client.stream(tokio_stream::iter([req])).await {
+        //                 Ok(s) => s.into_inner(),
+        //                 Err(e) => bail_error!(tid=tid, error=%e, "stream init failed"),
+        //             };
+        //             info!(tid=tid, "checking stream 1!");
+        //             match stream.message().await {
+        //                 Err(e) => bail_error!(tid=tid, error=%e, "rcv stream init failed"),
+        //                 Ok(None) => info!(tid=tid, "init stream closed?"),
+        //                 Ok(Some(val)) => info!(tid=tid, value=?val, "init stream value"),
+        //             };
+        //             _stream = Some(stream);
+        //             // trans_options = Some(containerd_client::services::v1::TransferOptions { progress_stream:stream_uuid.clone() });
+        //             resolver = Some(RegistryResolver {
+        //                 auth_stream: stream_uuid.clone(),
+        //                 ..Default::default()
+        //             });
+        //         }
+        //     }
+        // }
+        // tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        // let source = OciRegistry {
+        //     reference: image_name.to_string(),
+        //     resolver,
+        // };
+        // let arch = match std::env::consts::ARCH {
+        //     "x86_64" => "amd64",
+        //     "aarch64" => "arm64",
+        //     _ => std::env::consts::ARCH,
+        // };
+        // let platform = Platform {
+        //     os: "linux".to_string(),
+        //     architecture: arch.to_string(),
+        //     ..Default::default()
+        // };
+        //
+        // let destination = ImageStore {
+        //     name: image_name.to_string(),
+        //     platforms: vec![platform.clone()],
+        //     unpacks: vec![UnpackConfiguration {
+        //         platform: Some(platform),
+        //         snapshotter: self.config.snapshotter.to_owned(),
+        //     }],
+        //     ..Default::default()
+        // };
+        //
+        // let anys = containerd_client::to_any(&source);
+        // let anyd = containerd_client::to_any(&destination);
+        // let request = TransferRequest {
+        //     source: Some(anys),
+        //     destination: Some(anyd),
+        //     options: trans_options,
+        // };
+        // // Execute the transfer (pull)
+        // info!(tid=tid, "pulling image");
+        // // if let Some(stream) = _stream.as_mut() {
+        // //     info!(tid=tid, "checking stream 2!");
+        // //     match stream.message().await {
+        // //         Err(e) => bail_error!(tid=tid, error=%e, "rcv stream init failed"),
+        // //         Ok(None) => info!(tid=tid, "init stream closed?"),
+        // //         Ok(Some(val)) => info!(tid=tid, value=?val, "init stream value")
+        // //     };
+        // // }
+        // let cnl = self.channel().clone();
+        // let nm = namespace.to_string();
+        // let j = tokio::spawn(async move {
+        //     let mut client = TransferClient::new(cnl);
+        //     client.transfer(with_namespace!(request, nm)).await
+        // });
+        // // let t = .await;
+        // // if let Some(stream) = _stream.as_mut() {
+        // //     info!(tid=tid, "checking stream 3!");
+        // //     match stream.message().await {
+        // //         Err(e) => bail_error!(tid=tid, error=%e, "rcv stream init failed"),
+        // //         Ok(None) => info!(tid=tid, "init stream closed?"),
+        // //         Ok(Some(val)) => info!(tid=tid, value=?val, "init stream value")
+        // //     };
+        // // }
+        // match j.await? {
+        //     Ok(_) => Ok(()),
+        //     Err(e) => bail_error!(tid=tid, error=%e, image_name=image_name, "Error pulling image"),
+        // }
     }
 
     /// Create a container using the given image in the specified namespace
@@ -539,7 +647,7 @@ impl ContainerdIsolation {
         let permit = match &self.creation_sem {
             Some(sem) => match sem.acquire().await {
                 Ok(p) => {
-                    debug!(tid=%tid, "Acquired containerd creation semaphore");
+                    debug!(tid = tid, "Acquired containerd creation semaphore");
                     Some(p)
                 },
                 Err(e) => {
@@ -554,7 +662,7 @@ impl ContainerdIsolation {
             Ok(n) => n,
             Err(e) => return err_val(e, device_resource),
         };
-        debug!(tid=%tid, namespace=%ns.name, containerid=%cid, "Assigning namespace to container");
+        debug!(tid=tid, namespace=%ns.name, containerid=%cid, "Assigning namespace to container");
 
         let address = &ns.namespace.ips[0].address;
 
@@ -587,21 +695,28 @@ impl ContainerdIsolation {
         let resp = match client.create(req).await {
             Ok(resp) => resp,
             Err(e) => {
-                bail_error_value!(tid=%tid, error=%e, "Containerd failed to create container", device_resource);
+                bail_error_value!(tid=tid, error=%e, "Containerd failed to create container", device_resource);
             },
         };
 
-        debug!(tid=%tid, response=?resp, "Container created");
+        debug!(tid=tid, response=?resp, "Container created");
 
         let mounts = match self.load_mounts(&cid, &reg.snapshot_base, tid).await {
             Ok(v) => v,
             Err(e) => {
                 drop(permit);
-                debug!(tid=%tid, "Dropped containerd creation semaphore after load_mounts error");
+                debug!(
+                    tid = tid,
+                    "Dropped containerd creation semaphore after load_mounts error"
+                );
                 return Err((e, device_resource));
             },
         };
         debug!(tid=%tid, "Mounts loaded");
+        let resources_dir = container_path(&cid);
+        if let Err(e) = make_paths(&resources_dir, tid) {
+            bail_error_value!(tid=%tid, error=%e, "make_paths failed", device_resource);
+        };
 
         let stdin = self.stdin_pth(&cid);
         if let Err(e) = touch(&stdin) {
@@ -622,19 +737,23 @@ impl ContainerdIsolation {
             rootfs: mounts,
             checkpoint: None,
             options: None,
-            stdin,
-            stdout,
-            stderr,
+            stdin: stdin.to_string_lossy().to_string(),
+            stdout: stdout.to_string_lossy().to_string(),
+            stderr: stderr.to_string_lossy().to_string(),
             terminal: false,
             runtime_path: "".to_owned(),
         };
+        // match std::os::unix::net::UnixListener::bind("/tmp/iluvatar/socks/ctr") {
+        //     Ok(_) => info!(tid=tid, "socket created OK"),
+        //     Err(e) => error!(tid=tid, error=%e, "socket creation error"),
+        // };
         let req = with_namespace!(req, namespace);
         match client.create(req).await {
             Ok(t) => {
                 drop(permit);
-                debug!(tid=%tid, "Dropped containerd creation semaphore after success");
+                debug!(tid = tid, "Dropped containerd creation semaphore after success");
                 let t = t.into_inner();
-                debug!(tid=%tid, task=?t, "Task created");
+                debug!(tid=tid, task=?t, "Task created");
                 let task = Task {
                     pid: t.pid,
                     container_id: Some(cid.clone()),
@@ -655,31 +774,35 @@ impl ContainerdIsolation {
                         compute,
                         device_resource,
                         tid,
-                    )?)
+                    )
+                    .await?)
                 }
             },
             Err(e) => {
                 drop(permit);
-                debug!(tid=%tid, "Dropped containerd containerd creation semaphore after error");
+                debug!(
+                    tid = tid,
+                    "Dropped containerd containerd creation semaphore after error"
+                );
                 if let Err(e) = self.remove_container_internal(&cid, namespace, tid).await {
                     return err_val(e, device_resource);
                 };
                 if let Err(e) = self.namespace_manager.return_namespace(ns, tid) {
                     return err_val(e, device_resource);
                 };
-                bail_error_value!(tid=%tid, error=%e, "Create task failed", device_resource);
+                bail_error_value!(tid=tid, error=%e, "Create task failed", device_resource);
             },
         }
     }
 
-    fn stdout_pth(&self, container_id: &str) -> String {
-        temp_file_pth(container_id, "stdout")
+    fn stdout_pth(&self, container_id: &str) -> PathBuf {
+        container_path(container_id).join("stdout")
     }
-    fn stderr_pth(&self, container_id: &str) -> String {
-        temp_file_pth(container_id, "stderr")
+    fn stderr_pth(&self, container_id: &str) -> PathBuf {
+        container_path(container_id).join("stderr")
     }
-    fn stdin_pth(&self, container_id: &str) -> String {
-        temp_file_pth(container_id, "stdin")
+    fn stdin_pth(&self, container_id: &str) -> PathBuf {
+        container_path(container_id).join("stdin")
     }
 }
 
@@ -692,7 +815,7 @@ impl ContainerIsolationService for ContainerdIsolation {
     /// creates and starts the entrypoint for a container based on the given image
     /// Run inside the specified namespace
     /// returns a new, unique ID representing it
-    #[cfg_attr(feature = "full_spans", tracing::instrument(skip(self, reg, fqdn, image_name, parallel_invokes, namespace, mem_limit_mb, cpus), fields(tid=%tid)))]
+    #[cfg_attr(feature = "full_spans", tracing::instrument(skip(self, reg, fqdn, image_name, parallel_invokes, namespace, mem_limit_mb, cpus), fields(tid=tid)))]
     async fn run_container(
         &self,
         fqdn: &str,
@@ -710,7 +833,7 @@ impl ContainerIsolationService for ContainerdIsolation {
         if !iso.eq(&Isolation::CONTAINERD) {
             error_value!("Only supports containerd Isolation, now {:?}", iso, device_resource);
         }
-        info!(tid=%tid, image=%image_name, namespace=%namespace, "Creating container from image");
+        info!(tid=tid, image=%image_name, namespace=%namespace, "Creating container from image");
         let mut container = self
             .create_container(
                 fqdn,
@@ -746,7 +869,7 @@ impl ContainerIsolationService for ContainerdIsolation {
                 Ok(Arc::new(container))
             },
             Err(e) => {
-                bail_error_value!(tid=%tid, error=%e, "Starting task failed", crate::services::containers::structs::ContainerT::revoke_device(&container));
+                bail_error_value!(tid=tid, error=%e, "Starting task failed", crate::services::containers::structs::ContainerT::revoke_device(&container));
             },
         }
     }
@@ -759,7 +882,7 @@ impl ContainerIsolationService for ContainerdIsolation {
         self.namespace_manager
             .return_namespace(container.namespace.clone(), tid)?;
 
-        info!(tid=%tid, container_id=%container.container_id, "Container deleted");
+        info!(tid=tid, container_id=%container.container_id, "Container deleted");
         Ok(())
     }
 
@@ -768,9 +891,10 @@ impl ContainerIsolationService for ContainerdIsolation {
         &self,
         rf: &mut RegisteredFunction,
         _fqdn: &str,
+        namespace: &str,
         tid: &TransactionId,
     ) -> Result<()> {
-        self.ensure_image(&rf.image_name, tid).await?;
+        self.ensure_image(&rf.image_name, tid, namespace).await?;
         let snapshot_base = self.search_image_digest(&rf.image_name, "default", tid).await?;
         rf.snapshot_base = snapshot_base;
         Ok(())
@@ -782,7 +906,7 @@ impl ContainerIsolationService for ContainerdIsolation {
         self_src: Arc<dyn ContainerIsolationService>,
         tid: &TransactionId,
     ) -> Result<()> {
-        info!(tid=%tid, namespace=%ctd_namespace, "Cleaning containers in namespace");
+        info!(tid=tid, namespace=%ctd_namespace, "Cleaning containers in namespace");
         let mut ctr_client = ContainersClient::new(self.channel());
         let req = ListContainersRequest {
             filters: vec!["labels.\"owner\"==iluvatar_worker".to_string()],
@@ -792,14 +916,14 @@ impl ContainerIsolationService for ContainerdIsolation {
         let resp = match ctr_client.list(req).await {
             Ok(resp) => resp,
             Err(e) => {
-                bail_error!(tid=%tid, error=%e, "Containerd failed to list containers");
+                bail_error!(tid=tid, error=%e, "Containerd failed to list containers");
             },
         };
-        debug!(tid=%tid, response=?resp, "Container list response");
+        debug!(tid=tid, response=?resp, "Container list response");
         let mut handles = vec![];
         for container in resp.into_inner().containers {
             let container_id = container.id.clone();
-            info!(tid=%tid, container_id=%container_id, "Removing container");
+            info!(tid=tid, container_id=%container_id, "Removing container");
 
             let svc_clone = self_src.clone();
             let ns_clone = ctd_namespace.to_string();
@@ -827,12 +951,12 @@ impl ContainerIsolationService for ContainerdIsolation {
                 Ok(r) => match r {
                     Ok(_r) => (),
                     Err(e) => {
-                        error!(tid=%tid, error=%e, "Encountered an error on container cleanup");
+                        error!(tid=tid, error=%e, "Encountered an error on container cleanup");
                         failed += 1;
                     },
                 },
                 Err(e) => {
-                    error!(tid=%tid, error=%e, "Encountered an error joining thread for container cleanup");
+                    error!(tid=tid, error=%e, "Encountered an error joining thread for container cleanup");
                     failed += 1;
                 },
             }
@@ -851,19 +975,19 @@ impl ContainerIsolationService for ContainerdIsolation {
         Ok(())
     }
 
-    #[cfg_attr(feature = "full_spans", tracing::instrument(skip(self, container, timeout_ms), fields(tid=%tid)))]
+    #[cfg_attr(feature = "full_spans", tracing::instrument(skip(self, container, timeout_ms), fields(tid=tid)))]
     async fn wait_startup(&self, container: &Container, timeout_ms: u64, tid: &TransactionId) -> Result<()> {
-        debug!(tid=%tid, container_id=%container.container_id(), "Waiting for startup of container");
+        debug!(tid=tid, container_id=%container.container_id(), "Waiting for startup of container");
         let stderr = self.stderr_pth(container.container_id());
         let start = now();
 
         let mut inotify = match Inotify::init() {
             Ok(i) => i,
-            Err(e) => bail_error!(error=%e, tid=%tid, "Init inotify watch failed"),
+            Err(e) => bail_error!(error=%e, tid=tid, "Init inotify watch failed"),
         };
         let dscriptor = match inotify.watches().add(&stderr, WatchMask::MODIFY) {
             Ok(d) => d,
-            Err(e) => bail_error!(error=%e, tid=%tid, "Adding inotify watch to file failed"),
+            Err(e) => bail_error!(error=%e, tid=tid, "Adding inotify watch to file failed"),
         };
         let mut buffer = [0; 256];
 
@@ -872,8 +996,8 @@ impl ContainerIsolationService for ContainerdIsolation {
                 Ok(_events) => {
                     // stderr was written to, gunicorn server is either up or crashed
                     match inotify.watches().remove(dscriptor) {
-                        Ok(e) => e,
-                        Err(e) => bail_error!(error=%e, tid=%tid, "Deleting inotify watch failed"),
+                        Ok(_) => (),
+                        Err(e) => bail_error!(error=%e, tid=tid, "Deleting inotify watch failed"),
                     };
                     break;
                 },
@@ -882,14 +1006,14 @@ impl ContainerIsolationService for ContainerdIsolation {
                         let stdout = self.read_stdout(container, tid).await;
                         let stderr = self.read_stderr(container, tid).await;
                         if !stderr.is_empty() {
-                            warn!(tid=%tid, container_id=%&container.container_id(), "Timeout waiting for container start, but stderr was written to?");
+                            warn!(tid=tid, container_id=%&container.container_id(), "Timeout waiting for container start, but stderr was written to?");
                             return Ok(());
                         }
-                        bail_error!(tid=%tid, container_id=%container.container_id(), stdout=%stdout, stderr=%stderr, "Timeout while reading inotify events for container");
+                        bail_error!(tid=tid, container_id=%container.container_id(), stdout=%stdout, stderr=%stderr, "Timeout while reading inotify events for container");
                     }
                 },
                 _ => {
-                    bail_error!(tid=%tid, container_id=%container.container_id(), "Error while reading inotify events for container")
+                    bail_error!(tid=tid, container_id=%container.container_id(), "Error while reading inotify events for container")
                 },
             };
             tokio::time::sleep(std::time::Duration::from_micros(100)).await;
@@ -897,12 +1021,12 @@ impl ContainerIsolationService for ContainerdIsolation {
         Ok(())
     }
 
-    #[cfg_attr(feature = "full_spans", tracing::instrument(skip(self, container), fields(tid=%tid)))]
+    #[cfg_attr(feature = "full_spans", tracing::instrument(skip(self, container), fields(tid=tid)))]
     async fn update_memory_usage_mb(&self, container: &Container, tid: &TransactionId) -> MemSizeMb {
         let cast_container = match crate::services::containers::structs::cast::<ContainerdContainer>(container) {
             Ok(c) => c,
             Err(e) => {
-                warn!(tid=%tid, error=%e, "Error casting container to ContainerdContainer");
+                warn!(tid=tid, error=%e, "Error casting container to ContainerdContainer");
                 container.mark_unhealthy();
                 return container.get_curr_mem_usage();
             },
@@ -910,7 +1034,7 @@ impl ContainerIsolationService for ContainerdIsolation {
         let contents = match std::fs::read_to_string(format!("/proc/{}/statm", cast_container.task.pid)) {
             Ok(c) => c,
             Err(e) => {
-                warn!(tid=%tid, error=%e, container_id=%cast_container.container_id, "Error trying to read container /proc/<pid>/statm");
+                warn!(tid=tid, error=%e, container_id=%cast_container.container_id, "Error trying to read container /proc/<pid>/statm");
                 container.mark_unhealthy();
                 return container.get_curr_mem_usage();
             },
@@ -923,7 +1047,7 @@ impl ContainerIsolationService for ContainerdIsolation {
             // multiply page size in bytes by number pages, then convert to mb
             Ok(size_pages) => (size_pages * 4096) / (1024 * 1024),
             Err(e) => {
-                warn!(tid=%tid, error=%e, vmrss=%vmrss, "Error trying to parse virtual memory resource set size");
+                warn!(tid=tid, error=%e, vmrss=%vmrss, "Error trying to parse virtual memory resource set size");
                 container.mark_unhealthy();
                 container.get_curr_mem_usage()
             },
@@ -936,7 +1060,7 @@ impl ContainerIsolationService for ContainerdIsolation {
         match std::fs::read_to_string(path) {
             Ok(s) => str::replace(&s, "\n", "\\n"),
             Err(e) => {
-                error!(tid=%tid, container_id=%container.container_id(), error=%e, "Error reading container");
+                error!(tid=tid, container_id=%container.container_id(), error=%e, "Error reading container");
                 format!("STDOUT_READ_ERROR: {}", e)
             },
         }
@@ -946,7 +1070,7 @@ impl ContainerIsolationService for ContainerdIsolation {
         match std::fs::read_to_string(path) {
             Ok(s) => str::replace(&s, "\n", "\\n"),
             Err(e) => {
-                error!(tid=%tid, container_id=%container.container_id(), error=%e, "Error reading container");
+                error!(tid=tid, container_id=%container.container_id(), error=%e, "Error reading container");
                 format!("STDERR_READ_ERROR: {}", e)
             },
         }

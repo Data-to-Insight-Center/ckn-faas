@@ -7,6 +7,7 @@ use std::sync::Arc;
 use time::format_description::FormatItem;
 use time::{format_description, OffsetDateTime, PrimitiveDateTime, UtcOffset};
 use tokio::time::Instant;
+use tracing::warn;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::time::FormatTime;
 
@@ -37,7 +38,10 @@ pub fn now() -> Instant {
 pub fn timezone(tid: &TransactionId) -> Result<String> {
     let mut tz_str = match std::fs::read_to_string("/etc/timezone") {
         Ok(t) => t,
-        Err(e) => bail_error!(tid=%tid, error=%e, "/etc/timezone is missing!!"),
+        Err(e) => {
+            warn!(tid=tid, error=%e, "/etc/timezone is missing, using default");
+            "America/Indiana/Indianapolis".to_owned()
+        },
     };
     tz_str.truncate(tz_str.trim_end().len());
     if tzdb::tz_by_name(&tz_str).is_some() {
@@ -45,7 +49,7 @@ pub fn timezone(tid: &TransactionId) -> Result<String> {
     }
     let sections: Vec<&str> = tz_str.split('/').collect();
     if sections.len() == 2 {
-        anyhow::bail!("Unknown timezome string {}", tz_str)
+        anyhow::bail!("Unknown timezone string {}", tz_str)
     }
     let tz_str_2 = format!("{}/{}", sections[0], sections[2]);
     match tzdb::tz_by_name(&tz_str_2) {
@@ -242,7 +246,7 @@ fn load_local_offset(from_time: OffsetDateTime, tid: &TransactionId) -> Result<U
     };
     let tm = match time_zone.find_local_time_type(from_time.unix_timestamp()) {
         Ok(t) => t,
-        Err(e) => bail_error!(tid=%tid, error=%e, "Failed to find time zone type"),
+        Err(e) => bail_error!(tid=tid, error=%e, "Failed to find time zone type"),
     };
     Ok(UtcOffset::from_whole_seconds(tm.ut_offset())?)
 }

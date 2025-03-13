@@ -1,8 +1,9 @@
 use super::containers::{containermanager::ContainerManager, ContainerIsolationCollection};
 use crate::worker_api::worker_config::{ContainerResourceConfig, FunctionLimits};
 use anyhow::Result;
+use iluvatar_library::char_map::{Chars, WorkerCharMap};
+use iluvatar_library::types::ContainerServer;
 use iluvatar_library::{
-    characteristics_map::{CharacteristicsMap, Values},
     transaction::TransactionId,
     types::{Compute, Isolation, MemSizeMb, ResourceTimings},
     utils::calculate_fqdn,
@@ -13,7 +14,7 @@ use std::{collections::HashMap, sync::Arc};
 use tracing::{debug, info};
 
 /// A registered function is ready to be run if invoked later. Resource configuration is set here (CPU, mem, isolation, compute-device.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct RegisteredFunction {
     pub function_name: String,
     pub function_version: String,
@@ -25,6 +26,7 @@ pub struct RegisteredFunction {
     pub parallel_invokes: u32,
     pub isolation_type: Isolation,
     pub supported_compute: Compute, // TODO: Rename Compute to ComputeDevice
+    pub container_server: ContainerServer,
     pub historical_runtime_data_sec: HashMap<Compute, Vec<f64>>,
 }
 
@@ -48,7 +50,7 @@ pub struct RegistrationService {
     cm: Arc<ContainerManager>,
     lifecycles: ContainerIsolationCollection,
     limits_config: Arc<FunctionLimits>,
-    characteristics_map: Arc<CharacteristicsMap>,
+    characteristics_map: WorkerCharMap,
     resources: Arc<ContainerResourceConfig>,
 }
 
@@ -57,7 +59,7 @@ impl RegistrationService {
         cm: Arc<ContainerManager>,
         lifecycles: ContainerIsolationCollection,
         limits_config: Arc<FunctionLimits>,
-        characteristics_map: Arc<CharacteristicsMap>,
+        characteristics_map: WorkerCharMap,
         resources: Arc<ContainerResourceConfig>,
     ) -> Arc<Self> {
         Arc::new(RegistrationService {
@@ -68,13 +70,6 @@ impl RegistrationService {
             characteristics_map,
             resources,
         })
-    }
-
-    fn compute_resource_fail(specific_compute: Compute) -> Result<()> {
-        anyhow::bail!(
-            "Could not register function for compute {:?} because the worker has no devices of that type!",
-            specific_compute
-        );
     }
 
     pub async fn register(&self, request: RegisterRequest, tid: &TransactionId) -> Result<Arc<RegisteredFunction>> {
@@ -110,7 +105,10 @@ impl RegistrationService {
             if (specific_compute == Compute::GPU && self.resources.gpu_resource.as_ref().map_or(0, |c| c.count) == 0)
                 || (specific_compute != Compute::CPU && specific_compute != Compute::GPU)
             {
-                Self::compute_resource_fail(specific_compute)?;
+                anyhow::bail!(
+                    "Could not register function for compute {} because the worker has no devices of that type!",
+                    specific_compute
+                );
             }
         }
 
@@ -131,13 +129,16 @@ impl RegistrationService {
             isolation_type: isolation,
             supported_compute: compute,
             historical_runtime_data_sec: HashMap::new(),
+            container_server: request.container_server.try_into()?,
         };
         for (lifecycle_iso, lifecycle) in self.lifecycles.iter() {
             if !isolation.contains(*lifecycle_iso) {
                 continue;
             }
             isolation.remove(*lifecycle_iso);
-            lifecycle.prepare_function_registration(&mut rf, &fqdn, tid).await?;
+            lifecycle
+                .prepare_function_registration(&mut rf, &fqdn, "default", tid)
+                .await?;
         }
         if !isolation.is_empty() {
             anyhow::bail!("Could not register function with isolation(s): {:?}", isolation);
@@ -147,33 +148,34 @@ impl RegistrationService {
             match serde_json::from_str::<ResourceTimings>(&request.resource_timings_json) {
                 Ok(r) => {
                     for dev_compute in compute.into_iter() {
-                        if let Some(timings) = r.get(&dev_compute.try_into()?) {
+                        if let Some(timings) = r.get(&dev_compute) {
                             debug!(tid=%tid, compute=%dev_compute, from_compute=%compute, fqdn=%fqdn, timings=?r, "Registering timings for function");
-                            let (cold, warm, prewarm, exec, e2e, _) =
-                                self.characteristics_map.get_characteristics(&dev_compute)?;
+                            let (cold, warm, prewarm, exec, e2e, _) = Chars::get_chars(&dev_compute)?;
                             for v in timings.cold_results_sec.iter() {
-                                self.characteristics_map.add(&fqdn, exec, Values::F64(*v), true);
+                                self.characteristics_map.update(&fqdn, exec, *v);
                             }
                             for v in timings.warm_results_sec.iter() {
-                                self.characteristics_map.add(&fqdn, exec, Values::F64(*v), true);
+                                self.characteristics_map.update(&fqdn, exec, *v);
                             }
                             for v in timings.cold_worker_duration_us.iter() {
-                                self.characteristics_map
-                                    .add(&fqdn, cold, Values::F64(*v as f64 / 1_000_000.0), true);
-                                self.characteristics_map
-                                    .add(&fqdn, e2e, Values::F64(*v as f64 / 1_000_000.0), true);
+                                self.characteristics_map.update_2(
+                                    &fqdn,
+                                    cold,
+                                    *v as f64 / 1_000_000.0,
+                                    e2e,
+                                    *v as f64 / 1_000_000.0,
+                                );
                             }
                             for v in timings.warm_worker_duration_us.iter() {
-                                self.characteristics_map
-                                    .add(&fqdn, warm, Values::F64(*v as f64 / 1_000_000.0), true);
-                                self.characteristics_map.add(
+                                self.characteristics_map.update_3(
                                     &fqdn,
+                                    warm,
+                                    *v as f64 / 1_000_000.0,
                                     prewarm,
-                                    Values::F64(*v as f64 / 1_000_000.0),
-                                    true,
+                                    *v as f64 / 1_000_000.0,
+                                    e2e,
+                                    *v as f64 / 1_000_000.0,
                                 );
-                                self.characteristics_map
-                                    .add(&fqdn, e2e, Values::F64(*v as f64 / 1_000_000.0), true);
                             }
                             rf.historical_runtime_data_sec
                                 .insert(dev_compute, timings.warm_results_sec.clone());
@@ -197,5 +199,9 @@ impl RegistrationService {
 
     pub fn get_registration(&self, fqdn: &str) -> Option<Arc<RegisteredFunction>> {
         self.reg_map.read().get(fqdn).cloned()
+    }
+
+    pub fn get_all_registered_functions(&self) -> Vec<Arc<RegisteredFunction>> {
+        self.reg_map.read().values().cloned().collect()
     }
 }

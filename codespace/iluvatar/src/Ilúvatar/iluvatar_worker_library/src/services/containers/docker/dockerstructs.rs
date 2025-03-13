@@ -1,4 +1,4 @@
-use crate::services::containers::http_client::HttpContainerClient;
+use crate::services::containers::clients::{create_container_client, ContainerClient};
 use crate::services::registration::RegisteredFunction;
 use crate::services::resources::gpu::ProtectedGpuRef;
 use crate::services::{
@@ -29,7 +29,7 @@ pub struct DockerContainer {
     invocations: Mutex<u32>,
     port: Port,
     state: Mutex<ContainerState>,
-    pub client: HttpContainerClient,
+    pub client: Box<dyn ContainerClient>,
     compute: Compute,
     device: RwLock<Option<GPU>>,
     mem_usage: RwLock<MemSizeMb>,
@@ -37,7 +37,7 @@ pub struct DockerContainer {
 }
 
 impl DockerContainer {
-    pub fn new(
+    pub async fn new(
         container_id: String,
         port: Port,
         address: String,
@@ -50,7 +50,7 @@ impl DockerContainer {
         device: Option<GPU>,
         tid: &TransactionId,
     ) -> ResultErrorVal<Self, Option<GPU>> {
-        let client = match HttpContainerClient::new(&container_id, port, &address, invoke_timeout, tid) {
+        let client = match create_container_client(function, &container_id, port, &address, invoke_timeout, tid).await {
             Ok(c) => c,
             Err(e) => return err_val(e, device),
         };
@@ -74,14 +74,14 @@ impl DockerContainer {
 
 #[tonic::async_trait]
 impl ContainerT for DockerContainer {
-    #[tracing::instrument(skip(self, json_args), fields(tid=%tid), name="DockerContainer::invoke")]
+    #[tracing::instrument(skip(self, json_args), fields(tid=tid), name="DockerContainer::invoke")]
     async fn invoke(&self, json_args: &str, tid: &TransactionId) -> Result<(ParsedResult, Duration)> {
         *self.invocations.lock() += 1;
         self.touch();
         match self.client.invoke(json_args, tid, &self.container_id).await {
             Ok(r) => Ok(r),
             Err(e) => {
-                warn!(tid=%tid, container_id=%self.container_id(), "Marking container unhealthy");
+                warn!(tid=tid, container_id=%self.container_id(), "Marking container unhealthy");
                 self.mark_unhealthy();
                 Err(e)
             },
@@ -154,13 +154,13 @@ impl ContainerT for DockerContainer {
         self.device.write().take()
     }
     fn add_drop_on_remove(&self, item: DroppableToken, tid: &TransactionId) {
-        debug!(tid=%tid, container_id=%self.container_id(), "Adding token to drop on remove");
+        debug!(tid=tid, container_id=%self.container_id(), "Adding token to drop on remove");
         self.drop_on_remove.lock().push(item);
     }
     fn remove_drop(&self, tid: &TransactionId) {
         let mut lck = self.drop_on_remove.lock();
         let to_drop = std::mem::take(&mut *lck);
-        debug!(tid=%tid, container_id=%self.container_id(), num_tokens=to_drop.len(), "Dropping tokens");
+        debug!(tid=tid, container_id=%self.container_id(), num_tokens=to_drop.len(), "Dropping tokens");
         for i in to_drop.into_iter() {
             drop(i);
         }

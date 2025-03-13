@@ -10,13 +10,12 @@ use crate::services::status::status_service::{build_load_avg_signal, StatusServi
 use crate::services::worker_health::WorkerHealthService;
 use crate::worker_api::iluvatar_worker::IluvatarWorkerImpl;
 use anyhow::Result;
+use iluvatar_library::char_map::worker_char_map;
+use iluvatar_library::energy::energy_logging::EnergyLogger;
 use iluvatar_library::influx::InfluxClient;
-use iluvatar_library::types::{Compute, HealthStatus, Isolation, ResourceTimings};
-use iluvatar_library::{bail_error, characteristics_map::CharacteristicsMap};
-use iluvatar_library::{characteristics_map::AgExponential, energy::energy_logging::EnergyLogger};
-use iluvatar_library::{transaction::TransactionId, types::MemSizeMb};
-use iluvatar_rpc::rpc::{CleanResponse, InvokeResponse, StatusResponse};
-use std::sync::Arc;
+use iluvatar_library::types::{Compute, ContainerServer, HealthStatus, Isolation, MemSizeMb, ResourceTimings};
+use iluvatar_library::{bail_error, transaction::TransactionId};
+use iluvatar_rpc::rpc::{CleanResponse, InvokeResponse, ListFunctionResponse, StatusResponse};
 
 pub mod worker_config;
 pub use worker_config as config;
@@ -26,7 +25,7 @@ pub mod sim_worker;
 pub mod worker_comm;
 
 pub async fn create_worker(worker_config: WorkerConfig, tid: &TransactionId) -> Result<IluvatarWorkerImpl> {
-    let cmap = Arc::new(CharacteristicsMap::new(AgExponential::new(0.6)));
+    let cmap = worker_char_map();
 
     let factory = IsolationFactory::new(worker_config.clone());
     let load_avg = build_load_avg_signal();
@@ -87,7 +86,7 @@ pub async fn create_worker(worker_config: WorkerConfig, tid: &TransactionId) -> 
     let invoker = invoker_fact
         .get_invoker_service(tid)
         .or_else(|e| bail_error!(tid=%tid, error=%e, "Failed to get invoker service"))?;
-    let health = WorkerHealthService::boxed(worker_config.clone(), invoker.clone(), reg.clone(), tid)
+    let health = WorkerHealthService::boxed(worker_config.clone(), invoker.clone(), reg.clone(), isos.clone(), tid)
         .await
         .or_else(|e| bail_error!(tid=%tid, error=%e, "Failed to make worker health service"))?;
     let status = StatusService::boxed(
@@ -120,7 +119,7 @@ pub async fn create_worker(worker_config: WorkerConfig, tid: &TransactionId) -> 
     };
 
     Ok(IluvatarWorkerImpl::new(
-        worker_config.clone(),
+        worker_config,
         container_man,
         invoker,
         status,
@@ -177,6 +176,7 @@ pub trait WorkerAPI {
         tid: TransactionId,
         isolate: Isolation,
         compute: Compute,
+        server: ContainerServer,
         timings: Option<&ResourceTimings>,
     ) -> Result<String>;
     /// Get worker status.
@@ -185,4 +185,5 @@ pub trait WorkerAPI {
     async fn health(&mut self, tid: TransactionId) -> Result<HealthStatus>;
     /// Make worker clean up containers, etc.
     async fn clean(&mut self, tid: TransactionId) -> Result<CleanResponse>;
+    async fn list_registered_funcs(&mut self, tid: TransactionId) -> Result<ListFunctionResponse>;
 }

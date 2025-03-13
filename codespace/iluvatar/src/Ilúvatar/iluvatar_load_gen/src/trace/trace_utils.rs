@@ -12,10 +12,11 @@ use iluvatar_library::tokio_utils::TokioRuntime;
 use iluvatar_library::{
     bail_error,
     transaction::TransactionId,
-    types::{CommunicationMethod, Compute, Isolation},
+    types::{CommunicationMethod, Compute},
     utils::port::Port,
 };
 use iluvatar_worker_library::services::containers::simulator::simstructs::SimInvokeData;
+use iluvatar_worker_library::worker_api::config::{Configuration, WorkerConfig};
 use iluvatar_worker_library::worker_api::worker_comm::WorkerAPIFactory;
 use std::{
     cmp::{max, min},
@@ -35,13 +36,13 @@ pub fn load_trace_csv<T: serde::de::DeserializeOwned, P: AsRef<Path> + tracing::
 ) -> Result<Vec<T>> {
     let mut trace_rdr = match csv::Reader::from_path(&csv) {
         Ok(csv) => csv,
-        Err(e) => bail_error!(error=%e, tid=%tid, path=csv, "Failed to open CSV file"),
+        Err(e) => bail_error!(error=%e, tid=tid, path=csv, "Failed to open CSV file"),
     };
     let mut ret = vec![];
     for (i, result) in trace_rdr.deserialize().enumerate() {
         match result {
             Ok(item) => ret.push(item),
-            Err(e) => bail_error!(error=%e, tid=%tid, line_num=i, path=csv, "Failed to deserialize item"),
+            Err(e) => bail_error!(error=%e, tid=tid, line_num=i, path=csv, "Failed to deserialize item"),
         }
     }
     Ok(ret)
@@ -69,8 +70,8 @@ fn choose_bench_data_for_func<'a>(func: &'a Function, bench_data: &'a BenchmarkS
     for (k, v) in bench_data.data.iter() {
         // does benchmark match all compute options for function?
         let mut prefered_compute = Compute::CPU;
-        for func_compute in func.parsed_compute.into_iter() {
-            if !v.resource_data.contains_key(&func_compute.try_into()?) {
+        for func_compute in func.compute.into_iter() {
+            if !v.resource_data.contains_key(&func_compute) {
                 continue;
             }
             if func_compute == Compute::GPU {
@@ -81,7 +82,7 @@ fn choose_bench_data_for_func<'a>(func: &'a Function, bench_data: &'a BenchmarkS
             }
         }
 
-        if let Some(timings) = v.resource_data.get(&prefered_compute.try_into()?) {
+        if let Some(timings) = v.resource_data.get(&prefered_compute) {
             let tot: u128 = timings.warm_invoke_duration_us.iter().sum();
             let avg_cold_us = timings.cold_invoke_duration_us.iter().sum::<u128>() as f64
                 / timings.cold_invoke_duration_us.len() as f64;
@@ -111,12 +112,12 @@ fn map_from_benchmark(
         if let Some((_last, elements)) = func.func_name.split('-').collect::<Vec<&str>>().split_last() {
             let name = elements.join("-");
             if bench.data.contains_key(&name) && func.image_name.is_some() {
-                info!(tid=%tid, function=%func.func_name, chosen_code=%name, "Function mapped to self name in benchmark");
+                info!(tid=tid, function=%func.func_name, chosen_code=%name, "Function mapped to self name in benchmark");
                 func.chosen_name = Some(name);
             }
         }
         if bench.data.contains_key(&func.func_name) && func.image_name.is_some() && func.chosen_name.is_none() {
-            info!(tid=%tid, function=%func.func_name, "Function mapped to exact name in benchmark");
+            info!(tid=tid, function=%func.func_name, "Function mapped to exact name in benchmark");
             func.chosen_name = Some(func.func_name.clone());
         }
         if func.chosen_name.is_none() {
@@ -140,7 +141,7 @@ fn map_from_benchmark(
             }
 
             if func.image_name.is_none() {
-                info!(tid=%tid, function=%&func.func_name, chosen_code=%chosen_name, "Function mapped to benchmark code");
+                info!(tid=tid, function=%&func.func_name, chosen_code=%chosen_name, "Function mapped to benchmark code");
                 func.cold_dur_ms = chosen_cold_time_ms as u64;
                 func.warm_dur_ms = chosen_warm_time_ms as u64;
                 func.chosen_name = Some(chosen_name);
@@ -153,10 +154,10 @@ fn map_from_benchmark(
             total_prewarms += prewarms;
         }
         match &func.chosen_name {
-            None => info!(tid=%tid, "not filling out sim_invoke_data"),
+            None => info!(tid = tid, "not filling out sim_invoke_data"),
             Some(name) => {
                 let mut sim_data = HashMap::new();
-                for compute in func.parsed_compute.unwrap().into_iter() {
+                for compute in func.compute.into_iter() {
                     let bench_data = bench.data.get(name).ok_or_else(|| {
                         anyhow::format_err!(
                             "Failed to get benchmark data for function '{}' with chosen_name '{}'",
@@ -166,7 +167,7 @@ fn map_from_benchmark(
                     })?;
                     let compute_data: &iluvatar_library::types::FunctionInvocationTimings = bench_data
                         .resource_data
-                        .get(&compute.try_into()?)
+                        .get(&compute)
                         .ok_or_else(|| {
                             anyhow::format_err!(
                             "failed to find data in bench_data.resource_data for function '{}' with chosen_name '{}' using compute '{}'",
@@ -189,7 +190,7 @@ fn map_from_benchmark(
             },
         }
     }
-    info!(tid=%tid, "A total of {} prewarmed containers", total_prewarms);
+    info!(tid = tid, "A total of {} prewarmed containers", total_prewarms);
     Ok(())
 }
 
@@ -227,19 +228,6 @@ pub fn map_functions_to_prep(
     max_prewarms: u32,
     tid: &TransactionId,
 ) -> Result<()> {
-    for (_, v) in funcs.iter_mut() {
-        v.parsed_compute = match v.compute.as_ref() {
-            Some(c) => Some(Compute::try_from(c)?),
-            None => Some(Compute::CPU),
-        };
-        v.parsed_isolation = match v.isolation.as_ref() {
-            Some(c) => Some(Isolation::try_from(c)?),
-            None => Some(Isolation::CONTAINERD),
-        };
-        // if runtype == RunType::Simulation && v.image_name.is_none() {
-        //     v.image_name = Some("SimImage".to_owned());
-        // }
-    }
     match load_type {
         LoadType::Lookbusy => map_from_lookbusy(funcs, default_prewarms, max_prewarms),
         LoadType::Functions => {
@@ -273,9 +261,7 @@ fn worker_prewarm_functions(
             let h_c = host.to_owned();
             let f_c = func_name.clone();
             let fct_cln = factory.clone();
-            let compute = func
-                .parsed_compute
-                .ok_or_else(|| anyhow::anyhow!("Function {} did not have a `parsed_compute` in prewarm", func_name))?;
+            let compute = func.compute;
             prewarm_calls.push(async move {
                 let mut errors = "Prewarm errors:".to_string();
                 let mut it = (1..4).peekable();
@@ -407,18 +393,9 @@ fn worker_wait_reg(
                 Some(i) => i.clone(),
                 None => anyhow::bail!("Unable to get prepared `image_name` for function '{}'", id),
             };
-            let comp = func.parsed_compute.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Function {} did not have a `parsed_compute` when going to register",
-                    f_c
-                )
-            })?;
-            let isol = func.parsed_isolation.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Function {} did not have a `parsed_isolation` when going to register",
-                    f_c
-                )
-            })?;
+            let comp = func.compute;
+            let isol = func.isolation;
+            let server = func.server;
             let mem = func.mem_mb;
             let func_timings = match &func.chosen_name {
                 Some(chosen_name) => match bench_data.as_ref() {
@@ -445,6 +422,7 @@ fn worker_wait_reg(
                     Some(method),
                     isol,
                     comp,
+                    server,
                     func_timings.as_ref(),
                 )
                 .await
@@ -502,4 +480,30 @@ pub fn save_controller_results(results: Vec<CompletedControllerInvocation>, args
         };
     }
     Ok(())
+}
+
+/// Copies the worker config to a new file uniquely named file, and changes the "name" field to match.
+pub fn make_simulation_worker_config(id: usize, orig_config_path: &str) -> Result<(WorkerConfig, String)> {
+    let dummy_worker_config = match Configuration::boxed(Some(orig_config_path), None) {
+        Ok(c) => c,
+        Err(e) => bail_error!(error=%e, "Failed to load base configuration for worker"),
+    };
+    let worker_name = format!("{}_{}", dummy_worker_config.name, id);
+    let overrides = vec![("name".to_owned(), worker_name.clone())];
+    let worker_config = match Configuration::boxed(Some(orig_config_path), Some(overrides)) {
+        Ok(c) => c,
+        Err(e) => bail_error!(error=%e, worker=worker_name, "Failed to load configuration for worker"),
+    };
+    let p = Path::new(orig_config_path)
+        .parent()
+        .unwrap()
+        .join(format!("{}.json", worker_name));
+    match File::create(&p) {
+        Ok(f) => match serde_json::to_writer_pretty(f, &worker_config) {
+            Ok(_) => (),
+            Err(e) => anyhow::bail!("Failed to serialize worker-specific config because '{:?}'", e),
+        },
+        Err(e) => anyhow::bail!("Failed to create worker-specific config file because '{:?}'", e),
+    };
+    Ok((worker_config, p.to_string_lossy().to_string()))
 }

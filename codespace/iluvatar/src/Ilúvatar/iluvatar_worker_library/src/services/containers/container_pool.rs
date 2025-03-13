@@ -92,9 +92,9 @@ impl ContainerPool {
     }
 
     /// Add the container to the pool
-    #[cfg_attr(feature = "full_spans", tracing::instrument(skip(self, container, pool, pool_type), fields(tid=%tid)))]
+    #[cfg_attr(feature = "full_spans", tracing::instrument(level="debug", skip(self, container, pool, pool_type), fields(tid=tid)))]
     fn add_container(&self, container: Container, pool: &Pool, tid: &TransactionId, pool_type: PoolType) {
-        debug!(tid=%tid, container_id=%container.container_id(), name=%self.pool_name, pool_type=?pool_type, "Inserting container into pool");
+        debug!(tid=tid, container_id=%container.container_id(), name=%self.pool_name, pool_type=?pool_type, "Inserting container into pool");
         match pool.get_mut(container.fqdn()) {
             Some(mut pool_list) => (*pool_list).push(container),
             None => {
@@ -109,7 +109,7 @@ impl ContainerPool {
         match self.idle_pool.get_mut(fqdn) {
             Some(mut pool_list) => match (*pool_list).pop() {
                 Some(c) => {
-                    debug!(tid=%tid, container_id=%c.container_id(), name=%self.pool_name, pool_type=?PoolType::Idle, "Removing random container from pool");
+                    debug!(tid=tid, container_id=%c.container_id(), name=%self.pool_name, pool_type=?PoolType::Idle, "Removing random container from pool");
                     self.add_container(c.clone(), &self.running_pool, tid, PoolType::Running);
                     Some(c)
                 },
@@ -127,7 +127,7 @@ impl ContainerPool {
                 Ok(())
             },
             None => {
-                bail_error!(tid=%tid, container_id=%container.container_id(), "Supposedly running container was not found in running pool")
+                bail_error!(tid=tid, container_id=%container.container_id(), "Supposedly running container was not found in running pool")
             },
         }
     }
@@ -180,7 +180,7 @@ impl ContainerPool {
 
     /// Add the container to the idle pool
     /// If an error occurs, the container will not be placed in the pool
-    #[cfg_attr(feature = "full_spans", tracing::instrument(skip(self, container), fields(tid=%tid)))]
+    #[cfg_attr(feature = "full_spans", tracing::instrument(level="debug", skip(self, container), fields(tid=tid)))]
     pub fn add_idle_container(&self, container: Container, tid: &TransactionId) {
         self.len.fetch_add(1, LEN_ORDERING);
         self.add_container(container, &self.idle_pool, tid, PoolType::Idle)
@@ -188,7 +188,7 @@ impl ContainerPool {
 
     /// Add the container to the running pool
     /// If an error occurs, the container will not be placed in the pool
-    #[cfg_attr(feature = "full_spans", tracing::instrument(skip(self, container), fields(tid=%tid)))]
+    #[cfg_attr(feature = "full_spans", tracing::instrument(level="debug", skip(self, container), fields(tid=tid)))]
     pub fn add_running_container(&self, container: Container, tid: &TransactionId) {
         self.len.fetch_add(1, LEN_ORDERING);
         self.add_container(container, &self.running_pool, tid, PoolType::Running)
@@ -197,7 +197,7 @@ impl ContainerPool {
     /// Removes the container if it was found in the _idle_ pool.
     /// Returns [None] if it was not found.
     /// Removing a running container can cause instability.
-    #[cfg_attr(feature = "full_spans", tracing::instrument(skip(self, container), fields(tid=%tid)))]
+    #[cfg_attr(feature = "full_spans", tracing::instrument(level="debug", skip(self, container), fields(tid=tid)))]
     pub fn remove_container(&self, container: &Container, tid: &TransactionId) -> Option<Container> {
         if let Some(c) = self.remove_container_pool(container, &self.idle_pool, tid, PoolType::Idle) {
             self.len.fetch_sub(1, LEN_ORDERING);
@@ -212,7 +212,7 @@ impl ContainerPool {
 
     /// Removes the container if it was found in the pool
     /// Returns [None] if it was not found
-    #[cfg_attr(feature = "full_spans", tracing::instrument(skip(self, container, pool_type, pool), fields(tid=%tid)))]
+    #[cfg_attr(feature = "full_spans", tracing::instrument(level="debug", skip(self, container, pool_type, pool), fields(tid=tid)))]
     fn remove_container_pool(
         &self,
         container: &Container,
@@ -225,7 +225,7 @@ impl ContainerPool {
                 let pool_list = pool_list.value_mut();
                 let (pos, pool_len) = self.find_container_pos(container, pool_list);
                 if pos < pool_len {
-                    debug!(tid=%tid, container_id=%container.container_id(), name=%self.pool_name, pool_type=?pool_type, "Removing container from pool");
+                    debug!(tid=tid, container_id=%container.container_id(), name=%self.pool_name, pool_type=?pool_type, "Removing container from pool");
                     Some(pool_list.remove(pos))
                 } else {
                     None
@@ -253,7 +253,6 @@ mod tests {
     use crate::services::{containers::simulator::simstructs::SimulatorContainer, registration::RegisteredFunction};
     use iluvatar_library::transaction::gen_tid;
     use iluvatar_library::{types::Isolation, utils::calculate_fqdn};
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     #[test]
@@ -264,14 +263,9 @@ mod tests {
             function_name: "name".to_string(),
             function_version: "vesr".to_string(),
             image_name: "img".to_string(),
-            memory: 0,
-            cpus: 0,
-            snapshot_base: "".to_string(),
             parallel_invokes: 1,
             isolation_type: Isolation::all(),
-            supported_compute: iluvatar_library::types::Compute::CPU,
-            fqdn: "".to_string(),
-            historical_runtime_data_sec: HashMap::new(),
+            ..std::default::Default::default()
         });
         let ctr = Arc::new(
             SimulatorContainer::new(
@@ -298,14 +292,9 @@ mod tests {
             function_name: "name".to_string(),
             function_version: "vesr".to_string(),
             image_name: "img".to_string(),
-            memory: 0,
-            cpus: 0,
-            snapshot_base: "".to_string(),
             parallel_invokes: 1,
             isolation_type: Isolation::all(),
-            supported_compute: iluvatar_library::types::Compute::CPU,
-            fqdn: "".to_string(),
-            historical_runtime_data_sec: HashMap::new(),
+            ..std::default::Default::default()
         });
         let ctr = Arc::new(
             SimulatorContainer::new(
@@ -336,14 +325,9 @@ mod tests {
             function_name: "name".to_string(),
             function_version: "vesr".to_string(),
             image_name: "img".to_string(),
-            memory: 0,
-            cpus: 0,
-            snapshot_base: "".to_string(),
             parallel_invokes: 1,
             isolation_type: Isolation::all(),
-            supported_compute: iluvatar_library::types::Compute::CPU,
-            fqdn: "".to_string(),
-            historical_runtime_data_sec: HashMap::new(),
+            ..std::default::Default::default()
         });
         let ctr = Arc::new(
             SimulatorContainer::new(
@@ -371,14 +355,9 @@ mod tests {
             function_name: "name".to_string(),
             function_version: "vesr".to_string(),
             image_name: "img".to_string(),
-            memory: 0,
-            cpus: 0,
-            snapshot_base: "".to_string(),
             parallel_invokes: 1,
             isolation_type: Isolation::all(),
-            supported_compute: iluvatar_library::types::Compute::CPU,
-            fqdn: "".to_string(),
-            historical_runtime_data_sec: HashMap::new(),
+            ..std::default::Default::default()
         });
         let ctr = Arc::new(
             SimulatorContainer::new(
@@ -410,28 +389,18 @@ mod tests {
             function_name: "name".to_string(),
             function_version: "vesr".to_string(),
             image_name: "img".to_string(),
-            memory: 0,
-            cpus: 0,
-            snapshot_base: "".to_string(),
             parallel_invokes: 1,
             isolation_type: Isolation::all(),
-            supported_compute: iluvatar_library::types::Compute::CPU,
-            fqdn: "".to_string(),
-            historical_runtime_data_sec: HashMap::new(),
+            ..std::default::Default::default()
         });
         let fqdn2 = calculate_fqdn("name2", "vesr");
         let reg2 = Arc::new(RegisteredFunction {
             function_name: "name2".to_string(),
             function_version: "vesr".to_string(),
             image_name: "img".to_string(),
-            memory: 0,
-            cpus: 0,
-            snapshot_base: "".to_string(),
             parallel_invokes: 1,
             isolation_type: Isolation::all(),
-            supported_compute: iluvatar_library::types::Compute::CPU,
-            fqdn: "".to_string(),
-            historical_runtime_data_sec: HashMap::new(),
+            ..std::default::Default::default()
         });
         let ctr = Arc::new(
             SimulatorContainer::new(
@@ -521,14 +490,9 @@ mod tests {
                     function_name: fqdn.clone(),
                     function_version: "vesr".to_string(),
                     image_name: "img".to_string(),
-                    memory: 0,
-                    cpus: 0,
-                    snapshot_base: "".to_string(),
                     parallel_invokes: 1,
                     isolation_type: Isolation::all(),
-                    supported_compute: iluvatar_library::types::Compute::CPU,
-                    fqdn: "".to_string(),
-                    historical_runtime_data_sec: HashMap::new(),
+                    ..std::default::Default::default()
                 });
                 b_c.wait().await;
                 for i in 0..creates {
@@ -565,14 +529,9 @@ mod tests {
             function_name: "name".to_string(),
             function_version: "vesr".to_string(),
             image_name: "img".to_string(),
-            memory: 0,
-            cpus: 0,
-            snapshot_base: "".to_string(),
             parallel_invokes: 1,
             isolation_type: Isolation::all(),
-            supported_compute: iluvatar_library::types::Compute::CPU,
-            fqdn: "".to_string(),
-            historical_runtime_data_sec: HashMap::new(),
+            ..std::default::Default::default()
         });
         let ctr = Arc::new(
             SimulatorContainer::new(
@@ -603,14 +562,9 @@ mod tests {
             function_name: "name".to_string(),
             function_version: "vesr".to_string(),
             image_name: "img".to_string(),
-            memory: 0,
-            cpus: 0,
-            snapshot_base: "".to_string(),
             parallel_invokes: 1,
             isolation_type: Isolation::all(),
-            supported_compute: iluvatar_library::types::Compute::CPU,
-            fqdn: "".to_string(),
-            historical_runtime_data_sec: HashMap::new(),
+            ..std::default::Default::default()
         });
         assert_eq!(cp.has_idle_container(&fqdn), ContainerState::Cold);
         let ctr = Arc::new(
@@ -654,14 +608,9 @@ mod tests {
             function_name: "name".to_string(),
             function_version: "vesr".to_string(),
             image_name: "img".to_string(),
-            memory: 0,
-            cpus: 0,
-            snapshot_base: "".to_string(),
             parallel_invokes: 1,
             isolation_type: Isolation::all(),
-            supported_compute: iluvatar_library::types::Compute::CPU,
-            fqdn: "".to_string(),
-            historical_runtime_data_sec: HashMap::new(),
+            ..std::default::Default::default()
         });
         assert_eq!(cp.has_container(&fqdn), ContainerState::Cold);
         let ctr = Arc::new(

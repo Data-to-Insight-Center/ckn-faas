@@ -4,6 +4,7 @@ use iluvatar_library::transaction::gen_tid;
 use iluvatar_library::types::HealthStatus;
 use iluvatar_library::utils::{config::args_to_json, port::Port};
 use iluvatar_worker_library::worker_api::{rpc::RPCWorkerAPI, WorkerAPI};
+use serde_json::json;
 use tracing::{error, info};
 
 pub async fn ping(host: String, port: Port) -> Result<()> {
@@ -52,11 +53,7 @@ pub async fn invoke_async_check(host: String, port: Port, args: AsyncCheck) -> R
 pub async fn prewarm(host: String, port: Port, args: PrewarmArgs) -> Result<()> {
     let tid = gen_tid();
     let mut api = RPCWorkerAPI::new(&host, port, &tid).await?;
-    let c = match &args.compute {
-        Some(c) => c.into(),
-        None => iluvatar_library::types::Compute::CPU,
-    };
-    let result = api.prewarm(args.name, args.version, tid, c).await;
+    let result = api.prewarm(args.name, args.version, tid, args.compute).await;
     match result {
         Ok(string) => info!("{}", string),
         Err(err) => error!("{}", err),
@@ -67,8 +64,6 @@ pub async fn prewarm(host: String, port: Port, args: PrewarmArgs) -> Result<()> 
 pub async fn register(host: String, port: Port, args: RegisterArgs) -> Result<()> {
     let tid = gen_tid();
     let mut api = RPCWorkerAPI::new(&host, port, &tid).await?;
-    let iso = args.isolation.into();
-    let compute = args.compute.into();
     let ret = api
         .register(
             args.name,
@@ -78,12 +73,32 @@ pub async fn register(host: String, port: Port, args: RegisterArgs) -> Result<()
             args.cpu,
             1,
             tid,
-            iso,
-            compute,
+            args.isolation.into(),
+            args.compute.into(),
+            args.server,
             None,
         )
         .await?;
     info!("{}", ret);
+    Ok(())
+}
+
+pub async fn list_registered_funcs(host: String, port: Port) -> Result<()> {
+    let mut api = RPCWorkerAPI::new(&host, port, &gen_tid()).await?;
+    let ret = api.list_registered_funcs(gen_tid()).await?;
+    let functions = ret
+        .functions
+        .into_iter()
+        .map(|func| {
+            json!({
+                "function_name": func.function_name,
+                "function_version": func.function_version,
+                "image_name": func.image_name,
+            })
+        })
+        .collect::<Vec<_>>();
+    let output = json!({ "functions": functions });
+    info!("{}", serde_json::to_string_pretty(&output).unwrap());
     Ok(())
 }
 

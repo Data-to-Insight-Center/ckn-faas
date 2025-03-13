@@ -6,7 +6,7 @@ use crate::services::{
 use anyhow::Result;
 use dashmap::mapref::multiple::RefMutMulti;
 use dashmap::DashMap;
-use iluvatar_library::characteristics_map::CharacteristicsMap;
+use iluvatar_library::char_map::{Chars, WorkerCharMap};
 use parking_lot::Mutex;
 use std::{
     collections::VecDeque,
@@ -18,7 +18,7 @@ pub struct PaellaGpuQueue {
     invoke_batches: DashMap<String, FunctionDetail>,
     est_time: Mutex<f64>,
     num_queued: AtomicUsize,
-    cmap: Arc<CharacteristicsMap>,
+    cmap: WorkerCharMap,
     fairness_thres: f64,
 }
 
@@ -38,7 +38,7 @@ impl FunctionDetail {
 }
 
 impl PaellaGpuQueue {
-    pub fn new(cmap: Arc<CharacteristicsMap>) -> Result<Arc<Self>> {
+    pub fn new(cmap: WorkerCharMap) -> Result<Arc<Self>> {
         let svc = Arc::new(Self {
             invoke_batches: DashMap::new(),
             est_time: Mutex::new(0.0),
@@ -70,21 +70,7 @@ impl PaellaGpuQueue {
 
 impl GpuQueuePolicy for PaellaGpuQueue {
     fn next_batch(&self) -> Option<Arc<RegisteredFunction>> {
-        let mut min_t = 1000000000.0;
-        let mut min_q = None;
-        for que in self.invoke_batches.iter() {
-            if let Some(item) = que.queue.front() {
-                if que.deficit >= self.fairness_thres {
-                    min_q = Some(que);
-                    break;
-                }
-                if min_t > item.est_wall_time {
-                    min_t = item.est_wall_time;
-                    min_q = Some(que);
-                }
-            }
-        }
-        min_q.map(|q| q.registration.clone())
+        Some(self.next()?.registration.clone())
     }
 
     fn pop_queue(&self) -> Option<GpuBatch> {
@@ -110,10 +96,10 @@ impl GpuQueuePolicy for PaellaGpuQueue {
         *self.est_time.lock()
     }
 
-    #[cfg_attr(feature = "full_spans", tracing::instrument(skip(self, item), fields(tid=%item.tid)))]
+    #[cfg_attr(feature = "full_spans", tracing::instrument(level="debug", skip(self, item), fields(tid=%item.tid)))]
     fn add_item_to_queue(&self, item: &Arc<EnqueuedInvocation>) -> Result<()> {
         self.num_queued.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let est_time = self.cmap.get_gpu_exec_time(&item.registration.fqdn);
+        let est_time = self.cmap.get_avg(&item.registration.fqdn, Chars::GpuExecTime);
         let que = MinHeapFloat::new_f(item.clone(), est_time, est_time);
         match self.invoke_batches.entry(item.registration.fqdn.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut v) => {

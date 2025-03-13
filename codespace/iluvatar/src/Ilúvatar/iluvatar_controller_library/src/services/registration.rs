@@ -1,10 +1,7 @@
 use crate::server::structs::{RegisteredFunction, RegisteredWorker};
-// use crate::server::structs::json::RegisterFunction;
 use crate::services::load_balance::LoadBalancer;
 use anyhow::Result;
 use dashmap::DashMap;
-// use iluvatar_library::api_register::RegisterWorker;
-use iluvatar_library::types::{Compute, Isolation};
 use iluvatar_library::{bail_error, transaction::TransactionId, utils::calculate_fqdn};
 use iluvatar_rpc::rpc::{RegisterRequest, RegisterWorkerRequest};
 use iluvatar_worker_library::worker_api::worker_comm::WorkerAPIFactory;
@@ -43,7 +40,7 @@ impl RegistrationService {
         tid: &TransactionId,
     ) -> Result<Arc<RegisteredWorker>> {
         if self.worker_registered(&worker.name) {
-            bail_error!(tid=%tid, worker=%worker.name, "Worker was already registered");
+            bail_error!(tid=tid, worker=%worker.name, "Worker was already registered");
         }
 
         let reg_worker = Arc::new(RegisteredWorker::from(worker)?);
@@ -69,21 +66,22 @@ impl RegistrationService {
                     function.cpus,
                     function.parallel_invokes,
                     tid.clone(),
-                    Isolation::CONTAINERD,
-                    Compute::CPU,
+                    function.isolate,
+                    function.compute,
+                    function.server,
                     function.timings.as_ref(),
                 )
                 .await
             {
                 Ok(_) => (),
                 Err(e) => {
-                    error!(tid=%tid, worker=%reg_worker.name, error=%e, "New worker failed to register function")
+                    error!(tid=tid, worker=%reg_worker.name, error=%e, "New worker failed to register function")
                 },
             };
         }
         self.lb.add_worker(reg_worker.clone(), tid);
         self.workers.insert(reg_worker.name.clone(), reg_worker.clone());
-        info!(tid=%tid, worker=%reg_worker.name, "worker successfully registered");
+        info!(tid=tid, worker=%reg_worker.name, "worker successfully registered");
         Ok(reg_worker)
     }
 
@@ -98,12 +96,12 @@ impl RegistrationService {
     }
 
     /// Register a new function with workers
-    pub async fn register_function(&self, function: RegisterRequest, tid: &TransactionId) -> Result<()> {
-        let fqdn = calculate_fqdn(&function.function_name, &function.function_version);
+    pub async fn register_function(&self, req: RegisterRequest, tid: &TransactionId) -> Result<()> {
+        let fqdn = calculate_fqdn(&req.function_name, &req.function_version);
         if self.function_registered(&fqdn) {
-            bail_error!(tid=%tid, fqdn=%fqdn, "Function was already registered");
+            bail_error!(tid=tid, fqdn=%fqdn, "Function was already registered");
         } else {
-            let function = Arc::new(RegisteredFunction::from(function));
+            let function = Arc::new(RegisteredFunction::from(req));
             for item in self.workers.iter() {
                 let worker = item.value();
                 let mut api = self
@@ -125,16 +123,16 @@ impl RegistrationService {
                         function.cpus,
                         function.parallel_invokes,
                         tid.clone(),
-                        Isolation::CONTAINERD,
-                        Compute::CPU,
-                        // function.timings.as_ref(),
-                        None,
+                        function.isolate,
+                        function.compute,
+                        function.server,
+                        function.timings.as_ref(),
                     )
                     .await
                 {
                     Ok(_) => (),
                     Err(e) => {
-                        error!(tid=%tid, worker=%worker.name, error=%e, "Worker failed to register new function")
+                        error!(tid=tid, worker=%worker.name, error=%e, "Worker failed to register new function")
                     },
                 };
             }
@@ -142,7 +140,7 @@ impl RegistrationService {
             self.functions.insert(fqdn.clone(), function);
         }
 
-        info!(tid=%tid, fqdn=%fqdn, "Function was registered");
+        info!(tid=tid, fqdn=%fqdn, "Function was registered");
         Ok(())
     }
 
