@@ -20,4 +20,4 @@ services:
       - /run/jtop.sock:/run/jtop.sock
       - /var/run/docker.sock:/var/run/docker.sock
     command: >
-      bash -c "python3 /app/power_logger.py & python3 /app/server.py"
+      bash -c "python3 /app/power_logger.py & python3 /app/server_random.py"

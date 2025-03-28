@@ -2,6 +2,7 @@ import torch
 from PIL import Image
 from torchvision import transforms
 from torchvision import models
+import uuid
 
 model_mapping = {
     "0d0172ce3cc25da4697f133e19887296883e696d2604850080e7eaf9c1188ae3-model": "googlenet",
@@ -17,6 +18,23 @@ class ModelStore:
         self.model_index = 0
         self.current_model_id = "e0e46c4c246a0a9d88c9cbbbb9a4390600abe071c4d532a4b28e7cb8e20b08d6-model"
 
+    #Baixi
+    def register_function(self,model_name):
+        request = pb2.RegisterRequest(
+            function_name=str(model_name),
+            function_version="1",
+            image_name="docker.io/sunbaixi96/ckn_switch_middleware-iluvatar-action-unix:latest",
+            memory=128,
+            cpus=1,
+            parallel_invokes=1,
+            transaction_id=str(uuid.uuid4()),
+            language=pb2.LanguageRuntime.PYTHON3,
+            compute=1,        # or appropriate platform ID
+            isolate=1,
+            container_server=0
+        )
+        response = worker.register(request)
+
     def get_current_model_id(self):
         return self.current_model_id
 
@@ -31,7 +49,12 @@ class ModelStore:
     # model = torch.hub.load('pytorch/vision:v0.10.0', 'convnext', pretrained=True)
 
     # model = torch.hub.load('pytorch/vision:v0.10.0', 'squeezenet1_1', pretrained=True)
-    model = torch.hub.load('pytorch/vision:v0.10.0', 'resnet152', pretrained=True)
+
+    # Baixi Comment this out
+    # model = torch.hub.load('pytorch/vision:v0.10.0', 'resnet152', pretrained=True)
+    self.register_function('resnet152')
+    # End Baixi
+
     # model = torch.hub.load('pytorch/vision:v0.10.0', 'shufflenet_v2_x0_5', pretrained=True)
     # model = torch.hub.load('pytorch/vision:v0.10.0', 'densenet201', pretrained=True)
     # model = torch.hub.load('pytorch/vision:v0.10.0', 'mobilenet_v3_small', pretrained=True)
@@ -41,15 +64,19 @@ class ModelStore:
     # model = models.regnet_y_128gf(weights="IMAGENET1K_SWAG_E2E_V1")
     # MobileNet_V3_Small
 
-    model.eval()
+    # model.eval()
 
     def change_model(self, model_name):
         if model_name == 'regnet':
-            self.model = models.regnet_y_128gf(weights="IMAGENET1K_SWAG_E2E_V1")
+            # self.model = models.regnet_y_128gf(weights="IMAGENET1K_SWAG_E2E_V1")
+            self.register_function('regnet_y_128gf') #Baixi
+
             print("Regnet requested...")
         else:
-            self.model = torch.hub.load('pytorch/vision:v0.10.0', model_name, pretrained=True)
-        self.model.eval()
+            # self.model = torch.hub.load('pytorch/vision:v0.10.0', model_name, pretrained=True)
+            self.register_function(model_name) #Baixi
+
+        # self.model.eval()
 
     def load_next_model(self):
         """
