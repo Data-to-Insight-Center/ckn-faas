@@ -591,18 +591,29 @@ def _lenient_csv_read(path: str) -> List[List[str]]:
     return rows
 
 def _extract_policy_from_tail(row: List[str]) -> str:
-    """Try to detect textual policy from last columns."""
+    """Detect policy name from row cells near the end."""
     def is_number(s: str) -> bool:
         try:
             float(s)
             return True
         except Exception:
             return False
-    for offset in (1, 2):
-        if len(row) >= offset:
-            cell = row[-offset].strip() if row[-offset] is not None else ""
-            if cell and not is_number(cell):
-                return cell.lower()
+
+    KNOWN_POLICIES = {
+        "randomized", "greedy", "mode_s", "mode-s", "modes",
+        "best_acc_1", "best_acc_2", "best_acc_3"
+    }
+
+    # scan last few columns (policy often lives near the end)
+    for cell in reversed(row[-6:]):  # look at last 6 cells
+        cell = (cell or "").strip().lower()
+        if not cell or is_number(cell):
+            continue
+        # normalize a few variants
+        cell = cell.replace(" ", "_")
+        if cell in KNOWN_POLICIES:
+            return cell
+
     return "mode_s"
 
 def _read_csv_lenient_any_schema(path: str) -> pd.DataFrame:
@@ -673,13 +684,27 @@ def aggregate_by_maxsize(df: pd.DataFrame, success_only: bool = True) -> pd.Data
 def _label_for(pol: str, ms: float) -> str:
     ms_int = int(ms)
     p = (pol or "mode_s").lower()
-    if ms_int == 1:
-        return "Fastest model"
+
+    # fastest single-model baseline (size==1 from your logs)
+    if ms_int == 1 and p in {"mode_s", "greedy", "mode-s", "modes"}:
+        return "Fastest with low-accuracy model"
+
     if p == "randomized":
         return f"Random model set size {ms_int}"
+
     if p in {"greedy", "mode_s", "mode-s", "modes"}:
         return f"MODE-S max model set size {ms_int}"
+
+    # ✅ NEW: accuracy-based fixed policies
+    if p == "best_acc_1":
+        return "Best-accuracy model"
+    if p == "best_acc_2":
+        return "Best-accuracy models"
+    if p == "best_acc_3":
+        return "Best-accuracy models"
+
     return f"{p} size {ms_int}"
+
 
 def plot(grouped: pd.DataFrame, out_png: str) -> None:
     fig, ax = plt.subplots()
@@ -703,9 +728,14 @@ def plot(grouped: pd.DataFrame, out_png: str) -> None:
         #   - randomized policy
         # solid for:
         #   - MODE-S and other non-random multi-model policies
+        p = (pol or "").lower()
+
         is_fastest = (int(ms) == 1)
-        is_random  = (pol or "").lower() == "randomized"
-        dashed = is_fastest or is_random
+        is_random = (p == "randomized")
+        is_bestacc = (p in {"best_acc_1", "best_acc_2", "best_acc_3"})
+
+        dashed = is_fastest or is_random or is_bestacc
+
         # ----------------------------------
 
         ax.errorbar(

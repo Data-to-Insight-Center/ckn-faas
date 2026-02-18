@@ -261,9 +261,36 @@ def build_model_set(wait_results: dict, deadline_ms: int):
         print(f"[build_model_set] RANDOMIZED selected: {M_D}")
         return M_D, total_estimates
 
+    def get_acc(m: str) -> float:
+        # Option A: accuracy stored in MODEL_PROFILES
+        if m in MODEL_PROFILES and "accuracy" in MODEL_PROFILES[m]:
+            return float(MODEL_PROFILES[m]["accuracy"])
+        # Fallback if missing (pushes it to the end)
+        return float("-inf")
+    def select_topk_by_accuracy(k: int):
+        k = min(k, len(M_TOTAL))
+        # Sort models by accuracy (high -> low)
+        sorted_by_acc = sorted(M_TOTAL, key=get_acc, reverse=True)
+        M_D = sorted_by_acc[:k]
+
+        total_estimates = {m: wait_results.get(m, float("inf")) for m in M_D}
+        print(f"[build_model_set] TOP-{k}-ACC selected: {M_D} "
+              f"acc={[get_acc(m) for m in M_D]}")
+        return M_D, total_estimates
+
+    if POLICY == "best_acc_1":
+        return select_topk_by_accuracy(1)
+
+    if POLICY == "best_acc_2":
+        return select_topk_by_accuracy(2)
+
+    if POLICY == "best_acc_3":
+        return select_topk_by_accuracy(3)
+
     if POLICY != "greedy":
         print(f"[WARN] Unknown POLICY='{POLICY}', returning empty.")
         return [], {}
+
 
     # -----------------------------
     # GREEDY CONSTRUCTION
