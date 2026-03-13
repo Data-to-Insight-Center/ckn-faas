@@ -3,7 +3,7 @@ import iluvatar_rpc_pb2 as pb2
 import iluvatar_rpc_pb2_grpc as pb2_grpc
 import uuid
 
-channel = grpc.insecure_channel("149.165.152.35:8079")
+channel = grpc.insecure_channel("149.165.174.241:8070")
 worker = pb2_grpc.IluvatarWorkerStub(channel)
 # print(pb2.RegisterRequest.DESCRIPTOR.fields_by_name.keys())
 # request = pb2.RegisterRequest(
@@ -62,12 +62,12 @@ for model_name in model_list:
             function_version="1",
             image_name="docker.io/iud2i/ckn_faas_{}-iluvatar-action-http:latest".format(model_name),
             memory=1024,
-            cpus=2,
+            cpus=1,
             parallel_invokes=1,
             transaction_id=str(uuid.uuid4()),
             language=pb2.LanguageRuntime.PYTHON3,
-            compute=1,
-            isolate=1,
+            compute=2,
+            isolate=2,
             container_server=0
         )
     else:
@@ -76,12 +76,12 @@ for model_name in model_list:
             function_version="1",
             image_name="docker.io/iud2i/ckn_faas_{}-iluvatar-action-http:latest".format(model_name),
             memory=512,
-            cpus=2,
+            cpus=1,
             parallel_invokes=1,
             transaction_id=str(uuid.uuid4()),
             language=pb2.LanguageRuntime.PYTHON3,
-            compute=1,
-            isolate=1,
+            compute=2,
+            isolate=2,
             container_server=0
         )
 

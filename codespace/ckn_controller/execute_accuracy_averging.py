@@ -111,7 +111,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 image_dir = "/Users/agamage/Desktop/D2I/Codes Original/clone main/ckn-faas/ckn_data/images/tem"
 model_list = ["mobilenet_v3_small", "resnet18", "resnet34", "resnet50", "resnet101", "vit_b_16"]
 
-channel = grpc.insecure_channel("149.165.152.35:8079")
+channel = grpc.insecure_channel("149.165.174.241:8070")
 worker = pb2_grpc.IluvatarWorkerStub(channel)
 
 def read_image_as_base64(path):

@@ -201,9 +201,9 @@ def _get_model_size(response):
 def log_result(mode, req_id, deadline, iar, response_time, current_time_sec, response):
     os.makedirs("data", exist_ok=True)
     if mode == "vary_deadline":
-        log_path = "/Users/agamage/Desktop/D2I/Codes Original/clone main/ckn-faas/codespace/workload_generator/data/avg_latency_vs_arrival_para_run3_test.csv"
+        log_path = "/Users/agamage/Desktop/D2I/Codes Original/clone main/ckn-faas/codespace/workload_generator/data/accuracy_confidence_logs_2_3_S.csv"
     else:
-        log_path = "/Users/agamage/Desktop/D2I/Codes Original/clone main/ckn-faas/codespace/workload_generator/data/avg_latency_vs_arrival_para_run3_test.csv"
+        log_path = "/Users/agamage/Desktop/D2I/Codes Original/clone main/ckn-faas/codespace/workload_generator/data/accuracy_confidence_logs_2_3_S.csv"
 
     write_header = not os.path.exists(log_path)
 

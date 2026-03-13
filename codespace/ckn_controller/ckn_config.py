@@ -55,9 +55,9 @@ OMEGA = {
     "vit_b_16": 0.864,
 }
 
-SERVER_ADDRESS = "149.165.152.35:8079"
+SERVER_ADDRESS = "149.165.174.241:8070"
 
-MAX_MODEL_SIZE=4
+MAX_MODEL_SIZE=3
 
 MODEL_WEIGHTS = {}
 GAMMA = 0.9
@@ -82,3 +82,39 @@ MODEL_SIZES = {
     "resnet101":          171000000,
     "vit_b_16":           330000000,
 }
+
+
+
+# --- Cascaded ensemble parameters ---
+ENSEMBLE_SIZE = 3        # always select exactly this many models (if feasible)
+THRESHOLD = 0.85         # early-exit confidence threshold
+
+
+THRESHOLD_STAGE = []
+
+# --- Alpha mode ---
+ALPHA_MODE = "adaptive"   # "adaptive" or "static"
+ALPHA_STATIC = 1.0        # used only if ALPHA_MODE="static"
+
+# --- Adaptive alpha range ---
+ALPHA_MIN = 0.2          # high load -> prioritize latency
+ALPHA_MAX = 1.0          # low load  -> prioritize accuracy
+
+
+# --- Load estimation (QPS sliding window) ---
+QPS_WINDOW_SEC = 1.0     # how far back to count requests for QPS
+QPS_LOW = 10             # below this, treat as low load
+QPS_HIGH = 100           # above this, treat as high load
+
+
+# # --- Wait-time normalization (Ilúvatar congestion) ---
+# WAIT_LOW = 0.01          # seconds (10ms): low congestion
+# WAIT_HIGH = 0.2          # seconds (200ms): high congestion
+
+
+PARALLEL_FIRST_N = 2   # run first N models in parallel at the beginning
+PARALLEL_BATCH_SIZE = 1   # keep 1 for sequential after first batch
+
+
+
+
