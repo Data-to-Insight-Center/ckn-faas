@@ -1,0 +1,11 @@
+deadline_ms=15000
+ensemble_size=3
+parallel_first_n=2
+network_latency=0.01
+alpha=1.0
+use_real_waits=True
+num_steps=45
+poll_interval_sec=3.0
+threshold=0.9
+selection_strategy=exhaustive
+use_deadline_fast_path=True

@@ -55,7 +55,7 @@ OMEGA = {
     "vit_b_16": 0.864,
 }
 
-SERVER_ADDRESS = "149.165.174.241:8070"
+# SERVER_ADDRESS = "149.165.175.242:8079"
 
 MAX_MODEL_SIZE=3
 
@@ -86,8 +86,8 @@ MODEL_SIZES = {
 
 
 # --- Cascaded ensemble parameters ---
-ENSEMBLE_SIZE = 3        # always select exactly this many models (if feasible)
-THRESHOLD = 0.85         # early-exit confidence threshold
+ENSEMBLE_SIZE = 3       # always select exactly this many models (if feasible)
+THRESHOLD = 0.90         # early-exit confidence threshold
 
 
 THRESHOLD_STAGE = []
@@ -97,14 +97,14 @@ ALPHA_MODE = "adaptive"   # "adaptive" or "static"
 ALPHA_STATIC = 1.0        # used only if ALPHA_MODE="static"
 
 # --- Adaptive alpha range ---
-ALPHA_MIN = 0.2          # high load -> prioritize latency
-ALPHA_MAX = 1.0          # low load  -> prioritize accuracy
+ALPHA_MIN = 0.1          # high load -> prioritize latency
+ALPHA_MAX = 0.9          # low load  -> prioritize accuracy
 
 
 # --- Load estimation (QPS sliding window) ---
-QPS_WINDOW_SEC = 1.0     # how far back to count requests for QPS
-QPS_LOW = 10             # below this, treat as low load
-QPS_HIGH = 100           # above this, treat as high load
+QPS_WINDOW_SEC = 5.0     # how far back to count requests for QPS
+QPS_LOW = 1             # below this, treat as low load
+QPS_HIGH = 10           # above this, treat as high load
 
 
 # # --- Wait-time normalization (Ilúvatar congestion) ---
@@ -112,9 +112,67 @@ QPS_HIGH = 100           # above this, treat as high load
 # WAIT_HIGH = 0.2          # seconds (200ms): high congestion
 
 
-PARALLEL_FIRST_N = 2   # run first N models in parallel at the beginning
-PARALLEL_BATCH_SIZE = 1   # keep 1 for sequential after first batch
+# -----------------------------
+# Iluvatar instance mode
+# -----------------------------
+USE_TWO_ILUVATAR_INSTANCES = False
 
+# Single-instance fallback
+SERVER_ADDRESS = "149.165.175.242:8079"
+
+# Dual-instance addresses
+SMALL_MODEL_SERVER_ADDRESS = "149.165.175.242:8079"
+LARGE_MODEL_SERVER_ADDRESS = "149.165.174.241:8079"
+
+# Manual routing
+SMALL_INSTANCE_MODELS = [
+    "mobilenet_v3_small",
+    "resnet18",
+    "resnet34",
+    "resnet50",
+]
+
+LARGE_INSTANCE_MODELS = [
+    "resnet101",
+    "vit_b_16",
+]
+
+# # -----------------------------
+# # Cascade execution mode
+# # -----------------------------
+# # "sequential"
+# # "parallel_first"
+# # "full_parallel"
+# CASCADE_MODE = "full_parallel"
+
+PARALLEL_FIRST_N = 2   # run first N models in parallel at the beginning
+PARALLEL_BATCH_SIZE = 2   # keep 1 for sequential after first batch
+
+
+# -----------------------------
+# Cascade mode
+# -----------------------------
+# options: "mode_s", "sequential", "parallel_first_finish"
+CASCADE_MODE = "mode_s"
+
+# -----------------------------
+# Selection strategy
+# Only used for sequential and parallel_first_finish
+# options: "greedy", "exhaustive"
+# -----------------------------
+SELECTION_STRATEGY = "exhaustive"
+
+# -----------------------------
+# Deadline fast-path
+# If True: if selected set estimated latency >= deadline,
+# fallback to fastest model
+# -----------------------------
+USE_DEADLINE_FAST_PATH = True
+
+# -----------------------------
+# Network latency between stages (seconds)
+# -----------------------------
+NETWORK_LATENCY = 0.01
 
 
 

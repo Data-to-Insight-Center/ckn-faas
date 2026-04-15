@@ -1,0 +1,31 @@
+deadline_ms=200
+ensemble_size=3
+parallel_first_n=2
+network_latency=0.01
+alpha=1.0
+use_real_waits=True
+
+MODE-S selected: ['resnet50', 'resnet34', 'resnet18']
+MODE-S estimated Te: 0.178754 s
+MODE-S cost: 2.621739
+MODE-S feasible: True
+
+Sequential greedy selected: ['resnet18', 'mobilenet_v3_small', 'resnet34']
+Sequential greedy E[T]: 0.120569 s
+Sequential exhaustive selected: ['resnet18', 'mobilenet_v3_small', 'resnet34']
+Sequential exhaustive E[T]: 0.120569 s
+
+Parallel-first greedy selected: ['resnet18', 'mobilenet_v3_small', 'resnet34']
+Parallel-first greedy E[T]: 0.082541 s
+Parallel-first exhaustive selected: ['resnet18', 'resnet34', 'resnet50']
+Parallel-first exhaustive E[T]: 0.080839 s
+
+Wait results:
+  mobilenet_v3_small: 0.10252353584300268
+  resnet18: 0.057392524870980274
+  resnet34: 0.13385815265970755
+  resnet50: 0.1589196050563898
+  resnet101: 0.3517287733959642
+  vit_b_16: 0.3443459451516377
+
+

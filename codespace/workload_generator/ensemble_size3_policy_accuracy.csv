@@ -1,6 +1,0 @@
-combiner_policy,avg_accuracy,num_requests,ensemble_size
-weighted_majority,0.9564999999999999,2,3
-majority,0.9175,2,3
-most_confident,0.881,2,3
-weighted_majority/ML,0.876,2,3
-top1_accuracy,0.809,2,3

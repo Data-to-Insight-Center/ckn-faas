@@ -122,7 +122,6 @@ from rich.table import Table
 
 console = Console()
 
-# Fixed set of models you use (order matters for CSV and table)
 MODEL_LIST = [
     "mobilenet_v3_small",
     "resnet18",
@@ -132,35 +131,38 @@ MODEL_LIST = [
     "vit_b_16",
 ]
 
-# Build per-model columns for label, probability, wait
 PER_MODEL_LABEL_COLS = [f"{m}_label" for m in MODEL_LIST]
 PER_MODEL_PROB_COLS  = [f"{m}_prob"  for m in MODEL_LIST]
 PER_MODEL_WAIT_COLS  = [f"{m}_wait"  for m in MODEL_LIST]
 
 LOG_HEADER = [
     "ID", "Deadline", "IAR", "RespTime", "RunTime",
-    "selected_models", "label", "Accuracy", "combiner_policy",
-    "e2e_time_ms", "Success", "selected_folder",
-    "ModelSize",
-    # per-model labels
+    "selected_models",
+    "executed_models",
+    "label",
+    "Accuracy",
+    "combiner_policy",
+    "e2e_time_ms",
+    "Success",
+    "selected_folder",
+    "ensemble_size",
+    "threshold",
+    "threshold_stage",
+    "parallel_first_n",
+    "stop_reason",
+    "qps_est",
+    "main_policy",
+    "alpha",
+    "alpha_mode",
     *PER_MODEL_LABEL_COLS,
-    # per-model probabilities
     *PER_MODEL_PROB_COLS,
-    # per-model wait times
     *PER_MODEL_WAIT_COLS,
-
-    "main_policy", "alpha"
 ]
 
 def _get_per_model_fields(response):
-    """
-    Returns:
-      labels:  list[str] aligned with MODEL_LIST
-      probs:   list[float] aligned with MODEL_LIST
-    """
     per_model = response.get("per_model", {}) or {}
     labels = []
-    probs  = []
+    probs = []
     for m in MODEL_LIST:
         info = per_model.get(m, {}) or {}
         labels.append(str(info.get("label", "")))
@@ -182,48 +184,33 @@ def _get_per_model_waits(response):
             vals.append(-1.0)
     return vals
 
-def _get_model_size(response):
-    """
-    Accept multiple possible keys for safety:
-      - 'model_Size' (your example)
-      - 'MAX_MODEL_SIZE' (common alt)
-      - 'model_size' (lowercase)
-    Returns a number if available, else -1.
-    """
-    for k in ("model_Size", "MAX_MODEL_SIZE", "model_size"):
-        if k in response:
-            try:
-                return float(response[k])
-            except Exception:
-                return response[k]  # if it’s a string like "LARGE"
-    return -1
-
 def log_result(mode, req_id, deadline, iar, response_time, current_time_sec, response):
     os.makedirs("data", exist_ok=True)
-    if mode == "vary_deadline":
-        log_path = "/Users/agamage/Desktop/D2I/Codes Original/clone main/ckn-faas/codespace/workload_generator/data/accuracy_confidence_logs_2_3_S.csv"
-    else:
-        log_path = "/Users/agamage/Desktop/D2I/Codes Original/clone main/ckn-faas/codespace/workload_generator/data/accuracy_confidence_logs_2_3_S.csv"
-
+    log_path = "/Users/agamage/Desktop/D2I/Codes Original/clone main/ckn-faas/codespace/workload_generator/data/tem.csv"
     write_header = not os.path.exists(log_path)
 
-    # Pull fields from response
     selected_models = response.get("selected_models", [])
-    label           = response.get("label", -1)
-    accuracy        = response.get("accuracy", None)
-    combiner        = response.get("combiner_policy", "")
-    e2e_ms          = response.get("e2e_time_ms", -1)
-    success         = response.get("success", False)
+    executed_models = response.get("executed_models", [])
+    label = response.get("label", -1)
+    accuracy = response.get("accuracy", None)
+    combiner = response.get("combiner_policy", "")
+    e2e_ms = response.get("e2e_time_ms", -1)
+    success = response.get("success", False)
     selected_folder = response.get("selected_folder", "")
-    model_size      = _get_model_size(response)
-    main_policy        = response.get("main_policy", "")
-    alpha   = response.get("alpha", "")
+    ensemble_size = response.get("ensemble_size", -1)
+    threshold = response.get("threshold", "")
+    threshold_stage = response.get("threshold_stage", "")
+    parallel_first_n = response.get("parallel_first_n", "")
+    stop_reason = response.get("stop_reason", "")
+    qps_est = response.get("qps_est", "")
+    main_policy = response.get("main_policy", "")
+    alpha = response.get("alpha", "")
+    alpha_mode = response.get("alpha_mode", "")
+    selected_est_latency_s = response.get("selected_est_latency_s", -1)
 
-    # Per-model fields
     model_labels, model_probs = _get_per_model_fields(response)
     model_waits = _get_per_model_waits(response)
 
-    # ---- CSV write ----
     with open(log_path, "a", newline="") as f:
         writer = csv.writer(f)
         if write_header:
@@ -231,44 +218,75 @@ def log_result(mode, req_id, deadline, iar, response_time, current_time_sec, res
 
         row = [
             req_id, deadline, iar, response_time, current_time_sec,
-            selected_models, label, accuracy, combiner,
-            e2e_ms, success, selected_folder,
-            model_size,  # <--- NEW FIELD
+            selected_models,
+            executed_models,
+            label,
+            accuracy,
+            combiner,
+            e2e_ms,
+            success,
+            selected_folder,
+            ensemble_size,
+            threshold,
+            threshold_stage,
+            parallel_first_n,
+            stop_reason,
+            qps_est,
+            main_policy,
+            alpha,
+            alpha_mode,
             *model_labels,
             *model_probs,
             *model_waits,
-            main_policy,
-            alpha
+            selected_est_latency_s,
         ]
         writer.writerow(row)
 
-    # ---- Rich table (one row per request) ----
     table = Table(show_header=True, header_style="bold magenta")
     for col in LOG_HEADER:
         table.add_column(col)
 
-    # pretty strings
-    sm_str  = str(selected_models)
+    sm_str = str(selected_models)
+    em_str = str(executed_models)
     acc_str = f"{accuracy:.4f}" if isinstance(accuracy, (int, float)) and accuracy >= 0 else str(accuracy)
     e2e_str = f"{e2e_ms:.2f}" if isinstance(e2e_ms, (int, float)) else str(e2e_ms)
-    rt_str  = f"{response_time:.3f}"
-    ct_str  = f"{current_time_sec:.3f}"
-    ms_str  = f"{model_size:.2f}" if isinstance(model_size, (int, float)) else str(model_size)
+    rt_str = f"{response_time:.3f}"
+    ct_str = f"{current_time_sec:.3f}"
+    qps_str = f"{qps_est:.2f}" if isinstance(qps_est, (int, float)) else str(qps_est)
+    alpha_str = f"{alpha:.4f}" if isinstance(alpha, (int, float)) else str(alpha)
 
     model_probs_str = [f"{p:.4f}" if isinstance(p, (int, float)) and p >= 0 else str(p) for p in model_probs]
-    model_waits_str = [f"{w:.2f}"  if isinstance(w, (int, float)) and w >= 0 else str(w) for w in model_waits]
+    model_waits_str = [f"{w:.2f}" if isinstance(w, (int, float)) and w >= 0 else str(w) for w in model_waits]
 
     table.add_row(
-        str(req_id), str(deadline), str(iar), rt_str, ct_str,
-        sm_str, str(label), acc_str, str(combiner),
-        e2e_str, str(success), str(selected_folder),
-        ms_str,  # <--- NEW FIELD
+        str(req_id),
+        str(deadline),
+        str(iar),
+        rt_str,
+        ct_str,
+        sm_str,
+        em_str,
+        str(label),
+        acc_str,
+        str(combiner),
+        e2e_str,
+        str(success),
+        str(selected_folder),
+        str(ensemble_size),
+        str(threshold),
+        str(threshold_stage),
+        str(parallel_first_n),
+        str(stop_reason),
+        qps_str,
+        str(main_policy),
+        alpha_str,
+        str(alpha_mode),
         *[str(x) for x in model_labels],
         *model_probs_str,
         *model_waits_str,
-        str(main_policy),
-        str(alpha),
     )
+
+    console.print(table)
 
     # console.print(table)
 

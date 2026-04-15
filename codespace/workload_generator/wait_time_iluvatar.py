@@ -24,7 +24,7 @@ def get_estimated_wait(stub, model_name):
         return float('inf')
 
 def main():
-    channel = grpc.insecure_channel("149.165.174.241:8070")
+    channel = grpc.insecure_channel("149.165.175.242:8079")
     stub = pb2_grpc.IluvatarWorkerStub(channel)
 
     wait_results = {}

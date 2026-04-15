@@ -1,3 +1,0 @@
-IAR,group_label,mean_latency_ms,std_latency_ms,n,arrival_rate,ensemble_size,model_size,sem_latency_ms
-500,Model: mobilenet_v3_small | MaxSize 3,57298.464263274676,5110.322773488614,19,2.0,1,3.0,1172.3884493953349
-500,Ensemble size 3 | MaxSize 3,99517.06873369403,17607.054305864775,23,2.0,3,3.0,3671.324611858489

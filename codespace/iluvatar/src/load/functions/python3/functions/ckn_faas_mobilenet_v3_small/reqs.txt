@@ -9,8 +9,8 @@ pillow==11.0.0
 protobuf==5.29.4
 setuptools==79.0.0
 sympy==1.13.1
-torch==2.6.0+cpu
-torchaudio==2.6.0+cpu
-torchvision==0.21.0+cpu
+torch==2.6.0
+torchaudio==2.6.0
+torchvision==0.21.0
 tqdm==4.67.1
 typing_extensions==4.12.2

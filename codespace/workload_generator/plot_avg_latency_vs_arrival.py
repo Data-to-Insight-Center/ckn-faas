@@ -5,7 +5,7 @@
 # import matplotlib.pyplot as plt
 #
 # # ---- Adjust this to your folder/pattern ----
-# LOG_PATH_PATTERN = "/Users/agamage/Desktop/D2I/Codes Original/clone main/ckn-faas/codespace/workload_generator/data/avg_latency_vs_arrival.csv"
+# LOG_PATH_PATTERN = "/Users/agamage/Desktop/D2I/Codes Original/clone main/ckn-faas/codespace/workload_generator/data/avg_latency_vs_arrival_para.csv"
 # OUT_CSV = "avg_latency_vs_arrival_by_maxsize_resp.csv"
 # OUT_PNG = "avg_latency_vs_arrival_by_maxsize_resp.png"
 #
@@ -544,18 +544,18 @@
 
 
 
-#!/usr/bin/env python3
 import ast
 import csv
 import glob
+import os
+from typing import List
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from typing import List
 
 # ---- Adjust this to your folder/pattern ----
-# LOG_PATH_PATTERN = "/Users/agamage/Desktop/D2I/Codes Original/clone main/ckn-faas/codespace/workload_generator/data/avg_latency_vs_arrival1.csv"
-LOG_PATH_PATTERN = "/Users/agamage/Desktop/D2I/Codes Original/clone main/ckn-faas/codespace/workload_generator/data/avg_latency_vs_arrival_para_run3.csv"
+LOG_PATH_PATTERN = "/Users/agamage/Desktop/D2I/Codes Original/clone main/ckn-faas/codespace/workload_generator/data/avg_latency_vs_arrival_seq.csv"
 OUT_CSV = "avg_latency_vs_arrival_by_maxsize_resp.csv"
 OUT_PNG = "avg_latency_vs_arrival_by_maxsize_resp.png"
 
@@ -563,7 +563,8 @@ OUT_PNG = "avg_latency_vs_arrival_by_maxsize_resp.png"
 IAR_COL_IDX        = 2   # IAR (ms)
 RESP_COL_IDX       = 3   # RespTime (s)
 SEL_MODELS_COL_IDX = 5   # selected_models (stringified list)
-MODEL_SIZE_IDX     = 12  # ModelSize (numeric in new logs)
+MODEL_SIZE_IDX     = 13  # ensemble_size in updated logs
+
 
 def _parse_models_cell(x):
     """Parse selected_models like "['vit_b_16','resnet50']" to a list."""
@@ -578,17 +579,27 @@ def _parse_models_cell(x):
             return list(val)
     except Exception:
         pass
-    # Fallback: pull out items between quotes
     return [m for m in pd.Series(sx).str.findall(r"[\"']([^\"']+)[\"']").sum()]
 
+
+def _single_model_name(selected_models_cell):
+    """
+    Only meaningful when the selected model set size is 1.
+    """
+    models = _parse_models_cell(selected_models_cell)
+    if len(models) == 1:
+        return models[0]
+    return ""
+
+
 def _lenient_csv_read(path: str) -> List[List[str]]:
-    """Read CSV rows leniently and return list of string lists."""
     rows: List[List[str]] = []
     with open(path, "r", newline="") as f:
         rdr = csv.reader(f)
         for row in rdr:
             rows.append(row)
     return rows
+
 
 def _extract_policy_from_tail(row: List[str]) -> str:
     """Detect policy name from row cells near the end."""
@@ -599,22 +610,21 @@ def _extract_policy_from_tail(row: List[str]) -> str:
         except Exception:
             return False
 
-    KNOWN_POLICIES = {
+    known_policies = {
         "randomized", "greedy", "mode_s", "mode-s", "modes",
         "best_acc_1", "best_acc_2", "best_acc_3"
     }
 
-    # scan last few columns (policy often lives near the end)
-    for cell in reversed(row[-6:]):  # look at last 6 cells
+    for cell in reversed(row[-10:]):
         cell = (cell or "").strip().lower()
         if not cell or is_number(cell):
             continue
-        # normalize a few variants
         cell = cell.replace(" ", "_")
-        if cell in KNOWN_POLICIES:
+        if cell in known_policies:
             return cell
 
     return "mode_s"
+
 
 def _read_csv_lenient_any_schema(path: str) -> pd.DataFrame:
     rows = _lenient_csv_read(path)
@@ -624,28 +634,54 @@ def _read_csv_lenient_any_schema(path: str) -> pd.DataFrame:
 
     # Map required columns
     colnames = {}
-    if IAR_COL_IDX < df.shape[1]:        colnames[IAR_COL_IDX] = "IAR"
-    if RESP_COL_IDX < df.shape[1]:       colnames[RESP_COL_IDX] = "RespTime"
-    if SEL_MODELS_COL_IDX < df.shape[1]: colnames[SEL_MODELS_COL_IDX] = "selected_models"
-    if MODEL_SIZE_IDX < df.shape[1]:     colnames[MODEL_SIZE_IDX] = "ModelSize"
+    if IAR_COL_IDX < df.shape[1]:
+        colnames[IAR_COL_IDX] = "IAR"
+    if RESP_COL_IDX < df.shape[1]:
+        colnames[RESP_COL_IDX] = "RespTime"
+    if SEL_MODELS_COL_IDX < df.shape[1]:
+        colnames[SEL_MODELS_COL_IDX] = "selected_models"
+    if MODEL_SIZE_IDX < df.shape[1]:
+        colnames[MODEL_SIZE_IDX] = "ModelSize"
+
     df = df.rename(columns=colnames)
 
     # Policy extraction
-    df["main_policy"] = [ _extract_policy_from_tail(list(r)) for _, r in df.iterrows() ]
-    df["main_policy"] = df["main_policy"].astype(str).str.lower().replace({"": "mode_s"}).fillna("mode_s")
+    df["main_policy"] = [_extract_policy_from_tail(list(r)) for _, r in df.iterrows()]
+    df["main_policy"] = (
+        df["main_policy"]
+        .astype(str)
+        .str.lower()
+        .replace({"": "mode_s"})
+        .fillna("mode_s")
+    )
 
-    # Model size
+    # ModelSize comes from ensemble_size column in the log
     if "ModelSize" in df.columns:
         ms_num = pd.to_numeric(df["ModelSize"], errors="coerce")
     else:
         ms_num = pd.Series([np.nan] * len(df))
+
+    # Fallback only if ensemble_size is missing/invalid
     need_derive = ms_num.isna() | (ms_num <= 0)
     if "selected_models" in df.columns and need_derive.any():
         parsed = df.loc[need_derive, "selected_models"].apply(_parse_models_cell)
         ms_num.loc[need_derive] = parsed.apply(len).astype(float)
+
     df["ModelSize"] = ms_num
 
+    # Keep actual model name only for size==1
+    if "selected_models" in df.columns:
+        df["single_model_name"] = df["selected_models"].apply(_single_model_name)
+    else:
+        df["single_model_name"] = ""
+
+    # IMPORTANT FIX:
+    # For ModelSize >= 2, do not group by model name.
+    # Otherwise, you get multiple lines for the same ensemble size.
+    df["plot_model_name"] = np.where(df["ModelSize"] == 1, df["single_model_name"], "")
+
     return df
+
 
 def load_logs(pattern: str) -> pd.DataFrame:
     files = glob.glob(pattern)
@@ -654,106 +690,122 @@ def load_logs(pattern: str) -> pd.DataFrame:
     frames = [_read_csv_lenient_any_schema(f) for f in files]
     return pd.concat(frames, ignore_index=True)
 
+
 def aggregate_by_maxsize(df: pd.DataFrame, success_only: bool = True) -> pd.DataFrame:
     if success_only and "Success" in df.columns:
         df = df[df["Success"] == True].copy()
+
     for col in ("IAR", "RespTime", "ModelSize"):
         if col not in df.columns:
             raise ValueError(f"Missing required column '{col}' in CSV.")
         df[col] = pd.to_numeric(df[col], errors="coerce")
+
     df = df.dropna(subset=["IAR", "RespTime", "ModelSize"])
     df = df[df["ModelSize"] > 0]
+
     df["resp_time_ms"] = df["RespTime"] * 1000.0
     df["arrival_rate"] = 1000.0 / df["IAR"]
 
-    grouped = df.groupby(["IAR", "ModelSize", "main_policy"], dropna=False).agg(
+    grouped = df.groupby(
+        ["IAR", "ModelSize", "main_policy", "plot_model_name"],
+        dropna=False
+    ).agg(
         mean_latency_ms=("resp_time_ms", "mean"),
         std_latency_ms=("resp_time_ms", "std"),
         n=("resp_time_ms", "count"),
         arrival_rate=("arrival_rate", "mean"),
     ).reset_index()
+
     grouped["sem_latency_ms"] = grouped["std_latency_ms"] / np.sqrt(grouped["n"].clip(lower=1))
     grouped["sem_latency_ms"] = grouped["sem_latency_ms"].fillna(0.0)
     grouped["std_latency_ms"] = grouped["std_latency_ms"].fillna(0.0)
-    grouped = grouped.sort_values(["main_policy", "ModelSize", "arrival_rate"]).reset_index(drop=True)
-    print("[INFO] Lines to plot (policy, size → #points):")
-    for (pol, ms), sub in grouped.groupby(["main_policy", "ModelSize"]):
-        print(f"  - {pol}, size {int(ms)} → {len(sub)} points")
+
+    grouped = grouped.sort_values(
+        ["main_policy", "ModelSize", "plot_model_name", "arrival_rate"]
+    ).reset_index(drop=True)
+
+    print("[INFO] Lines to plot (policy, size, plot_model_name → #points):")
+    for (pol, ms, plot_model_name), sub in grouped.groupby(
+        ["main_policy", "ModelSize", "plot_model_name"]
+    ):
+        name_txt = plot_model_name if str(plot_model_name).strip() else "-"
+        print(f"  - {pol}, size {int(ms)}, model {name_txt} → {len(sub)} points")
+
     return grouped
 
-def _label_for(pol: str, ms: float) -> str:
+
+def _label_for(pol: str, ms: float, plot_model_name: str = "") -> str:
+    """
+    Label rule:
+    - If size == 1: show actual model name
+    - If size >= 2: show maximum model set size X
+    """
     ms_int = int(ms)
     p = (pol or "mode_s").lower()
+    name = str(plot_model_name).strip()
 
-    # fastest single-model baseline (size==1 from your logs)
-    if ms_int == 1 and p in {"mode_s", "greedy", "mode-s", "modes"}:
-        return "Fastest with low-accuracy model"
+    if ms_int == 1:
+        return name if name else "Single model"
 
     if p == "randomized":
-        return f"Random model set size {ms_int}"
+        return f"Random maximum model set size {ms_int}"
 
     if p in {"greedy", "mode_s", "mode-s", "modes"}:
-        return f"MODE-S max model set size {ms_int}"
+        return f"Sequential Case - model set size {ms_int}"
+        # return f"Power of Two Choices Case - model set size {ms_int}"
 
-    # ✅ NEW: accuracy-based fixed policies
     if p == "best_acc_1":
-        return "Best-accuracy model"
-    if p == "best_acc_2":
-        return "Best-accuracy models"
-    if p == "best_acc_3":
-        return "Best-accuracy models"
+        return name if name else "Best-accuracy model"
 
-    return f"{p} size {ms_int}"
+    if p in {"best_acc_2", "best_acc_3"}:
+        return f"Best-accuracy maximum model set size {ms_int}"
+
+    return f"{p} maximum model set size {ms_int}"
 
 
 def plot(grouped: pd.DataFrame, out_png: str) -> None:
     fig, ax = plt.subplots()
+
     ymin = max(grouped["mean_latency_ms"].min(), 1e-6)
     ymax = grouped["mean_latency_ms"].max()
     use_log = (ymax / ymin) > 20 if ymin > 0 else True
 
-    for (pol, ms), sub in grouped.groupby(["main_policy", "ModelSize"]):
+    for (pol, ms, plot_model_name), sub in grouped.groupby(
+        ["main_policy", "ModelSize", "plot_model_name"]
+    ):
         sub = sub.sort_values("arrival_rate")
+
         y = sub["mean_latency_ms"].to_numpy()
         yerr = sub["sem_latency_ms"].to_numpy()
+
         if use_log:
             y = np.maximum(y, 1e-6)
             yerr = np.minimum(yerr, 0.9 * y)
 
-        label_txt = _label_for(pol, ms).strip()
+        label_txt = _label_for(pol, ms, plot_model_name).strip()
 
-        # ------- DASH / SOLID LOGIC -------
-        # dashed for:
-        #   - fastest model (size == 1)
-        #   - randomized policy
-        # solid for:
-        #   - MODE-S and other non-random multi-model policies
         p = (pol or "").lower()
+        is_single = int(ms) == 1
+        is_random = p == "randomized"
+        is_bestacc = p in {"best_acc_1", "best_acc_2", "best_acc_3"}
 
-        is_fastest = (int(ms) == 1)
-        is_random = (p == "randomized")
-        is_bestacc = (p in {"best_acc_1", "best_acc_2", "best_acc_3"})
-
-        dashed = is_fastest or is_random or is_bestacc
-
-        # ----------------------------------
+        dashed = is_single or is_random or is_bestacc
 
         ax.errorbar(
             sub["arrival_rate"],
             y,
             yerr=yerr,
             fmt="o",
-            linestyle="--" if dashed else "-",   # dashed vs solid
+            linestyle="--" if dashed else "-",
             capsize=3,
             elinewidth=1,
-            linewidth=2.0 if int(ms) == 1 else 1.5,
+            linewidth=2.0 if is_single else 1.5,
             label=label_txt,
             alpha=0.95,
         )
 
     ax.set_xlabel("Arrival Rate (requests/second)")
     ax.set_ylabel("Average Latency (ms)")
-    # ax.set_title("Average Latency vs Arrival Rate by Model Set Size")
     ax.grid(True, linestyle="--", alpha=0.5)
     ax.legend(ncol=1, fontsize=9)
     fig.tight_layout()
@@ -761,12 +813,14 @@ def plot(grouped: pd.DataFrame, out_png: str) -> None:
     fig.show()
     print(f"[OK] Plot saved to: {out_png}")
 
+
 def main():
     df = load_logs(LOG_PATH_PATTERN)
     grouped = aggregate_by_maxsize(df, success_only=True)
     grouped.to_csv(OUT_CSV, index=False)
     print(f"[OK] Aggregated CSV saved to: {OUT_CSV}")
     plot(grouped, OUT_PNG)
+
 
 if __name__ == "__main__":
     main()

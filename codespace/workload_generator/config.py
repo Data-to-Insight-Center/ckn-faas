@@ -12,7 +12,7 @@ iar_profiles_ms = {
 }
 
 deadline_profiles_ms = {
-    "short": [10000],
+    "short": [1000],
     "medium": [100, 200, 300],
     "long": [500, 700, 1000]
 }

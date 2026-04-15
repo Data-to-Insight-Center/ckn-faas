@@ -5,7 +5,7 @@
 # import matplotlib.pyplot as plt
 #
 # # ---- Adjust this to your folder/pattern ----
-# LOG_PATH_PATTERN = "/Users/agamage/Desktop/D2I/Codes Original/clone main/ckn-faas/codespace/workload_generator/data/avg_latency_vs_arrival.csv"
+# LOG_PATH_PATTERN = "/Users/agamage/Desktop/D2I/Codes Original/clone main/ckn-faas/codespace/workload_generator/data/avg_latency_vs_arrival_para.csv"
 # OUT_CSV = "avg_latency_vs_arrival_by_maxsize_resp.csv"
 # OUT_PNG = "avg_latency_vs_arrival_by_maxsize_resp.png"
 #
@@ -752,7 +752,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from typing import List
 
-LOG_PATH_PATTERN = "/Users/agamage/Desktop/D2I/Codes Original/clone main/ckn-faas/codespace/workload_generator/data/avg_latency_vs_arrival_para_run3_add10.csv"
+LOG_PATH_PATTERN = "/Users/agamage/Desktop/D2I/Codes Original/clone main/ckn-faas/codespace/workload_generator/data/avg_latency_vs_arrival_para.csv"
 OUT_CSV = "avg_latency_vs_IAR_by_maxsize_resp.csv"
 OUT_PNG = "avg_latency_vs_IAR_by_maxsize_resp.png"
 

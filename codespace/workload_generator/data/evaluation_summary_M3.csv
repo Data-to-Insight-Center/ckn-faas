@@ -1,8 +1,0 @@
-model,total,avg_accuracy
-Ensemble size 3,49,0.9571428571428571
-mobilenet_v3_small,21,0.7571428571428571
-resnet18,20,0.77812
-resnet34,19,0.7814736842105263
-resnet50,16,0.7955
-resnet101,16,0.8225
-vit_b_16,8,0.81897

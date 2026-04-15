@@ -5,7 +5,7 @@ import os
 import shutil
 
 argparser = argparse.ArgumentParser()
-argparser.add_argument("--repo", help="Repository the image will be in", required=False, default="iud2i")
+argparser.add_argument("--repo", help="Repository the image will be in", required=False, default="plalelab")
 argparser.add_argument("--hub", help="Hub to push docker image too", required=False, default="docker.io")
 argparser.add_argument("--version", help="Version to tag images with.", required=False, default="latest")
 argparser.add_argument("--skip-push", '-s', help="Don't push images to remote.", action="store_true")
